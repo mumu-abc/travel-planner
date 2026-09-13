@@ -1,0 +1,92 @@
+[
+  {
+    "id": "T001",
+    "name": "东京短途",
+    "destination": "东京, 日本",
+    "days": 3,
+    "budget": 1500,
+    "interests": "美食,动漫",
+    "expected_keywords": ["浅草寺", "新宿", "寿司", "地铁"]
+  },
+  {
+    "id": "T002",
+    "name": "巴黎长途",
+    "destination": "巴黎, 法国",
+    "days": 10,
+    "budget": 5000,
+    "interests": "艺术,美食,历史",
+    "expected_keywords": ["埃菲尔铁塔", "卢浮宫", "欧元", "地铁"]
+  },
+  {
+    "id": "T003",
+    "name": "曼谷低预算",
+    "destination": "曼谷, 泰国",
+    "days": 5,
+    "budget": 800,
+    "interests": "美食,寺庙",
+    "expected_keywords": ["大皇宫", "泰铢", "冬阴功"]
+  },
+  {
+    "id": "T004",
+    "name": "首尔购物",
+    "destination": "首尔, 韩国",
+    "days": 4,
+    "budget": 2000,
+    "interests": "购物,美食,韩剧",
+    "expected_keywords": ["明洞", "景福宫", "韩元", "烤肉"]
+  },
+  {
+    "id": "T005",
+    "name": "新加坡亲子",
+    "destination": "新加坡",
+    "days": 5,
+    "budget": 3000,
+    "interests": "亲子,美食,自然",
+    "expected_keywords": ["圣淘沙", "滨海湾", "海南鸡饭"]
+  },
+  {
+    "id": "T006",
+    "name": "成都国内",
+    "destination": "成都, 中国",
+    "days": 3,
+    "budget": 1000,
+    "interests": "美食,熊猫,历史",
+    "expected_keywords": ["大熊猫", "火锅", "武侯祠", "春熙路"]
+  },
+  {
+    "id": "T007",
+    "name": "伦敦文化",
+    "destination": "伦敦, 英国",
+    "days": 7,
+    "budget": 4000,
+    "interests": "博物馆,历史,戏剧",
+    "expected_keywords": ["大英博物馆", "白金汉宫", "英镑"]
+  },
+  {
+    "id": "T008",
+    "name": "悉尼自然",
+    "destination": "悉尼, 澳大利亚",
+    "days": 6,
+    "budget": 3500,
+    "interests": "自然,海滩,野生动物",
+    "expected_keywords": ["歌剧院", "悉尼港", "澳元"]
+  },
+  {
+    "id": "T009",
+    "name": "迪拜奢华",
+    "destination": "迪拜, 阿联酋",
+    "days": 5,
+    "budget": 5000,
+    "interests": "奢华,建筑,购物",
+    "expected_keywords": ["哈利法塔", "帆船酒店", "迪拉姆"]
+  },
+  {
+    "id": "T010",
+    "name": "巴厘岛度假",
+    "destination": "巴厘岛, 印尼",
+    "days": 7,
+    "budget": 2000,
+    "interests": "海滩,瑜伽,文化",
+    "expected_keywords": ["海神庙", "乌布", "印尼盾"]
+  }
+]
