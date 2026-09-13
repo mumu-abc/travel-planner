@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+
+# Data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Test/Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 评测产物（保留 eval/eval_runner.py 与说明，只忽略报告）
+eval/report*.md
+!eval/report_latency.md
+!eval/消融对照说明.md
+
+# 个人求职准备材料（不入公共仓库，如需分享可手动移除本行）
+面试题目_*.md
+
+# 本地临时
+*.log
+.DS_Store
+Thumbs.db

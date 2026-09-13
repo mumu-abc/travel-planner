@@ -1,0 +1,1696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>航迹 · AI 旅行规划</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+
+:root {
+  --ink:#0B1F2A;
+  --panel:#122B38;
+  --panel-2:#183646;
+  --paper:#F4F1EA;
+  --card:#FFFCF7;
+  --route:#0F766E;
+  --route-soft:#D5F5F0;
+  --route-deep:#115E59;
+  --sun:#C2410C;
+  --sun-soft:#FFEDD5;
+  --ok:#15803D;
+  --ok-soft:#DCFCE7;
+  --err:#B91C1C;
+  --err-soft:#FEE2E2;
+  --ink-text:#1C2933;
+  --haze:#6B7C88;
+  --haze-2:#94A3B0;
+  --line:#D9D2C5;
+  --line-dark:rgba(255,255,255,.1);
+  --shadow:0 1px 2px rgba(28,41,51,.06),0 8px 24px rgba(28,41,51,.06);
+  --shadow-lg:0 12px 40px rgba(11,31,42,.18);
+  --r:14px;
+  --r-sm:10px;
+  --mono:Consolas,"SF Mono","Cascadia Code",ui-monospace,monospace;
+  --sans:"Segoe UI",-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+
+html,body { height:100%; }
+body {
+  font-family:var(--sans);
+  background:var(--paper);
+  color:var(--ink-text);
+  line-height:1.6;
+}
+
+.app {
+  display:grid;
+  grid-template-columns:360px 1fr;
+  min-height:100vh;
+}
+
+/* ── 左：操作台 ── */
+.sidebar {
+  background:
+    radial-gradient(1200px 400px at 0% 0%, rgba(15,118,110,.22), transparent 55%),
+    linear-gradient(180deg, #0B1F2A 0%, #0E2735 100%);
+  color:#E7EEF2;
+  padding:28px 22px 32px;
+  overflow-y:auto;
+  position:sticky;
+  top:0;
+  height:100vh;
+  border-right:1px solid rgba(0,0,0,.2);
+}
+
+.brand {
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  margin-bottom:6px;
+}
+.brand-mark {
+  width:42px; height:42px;
+  border-radius:12px;
+  background:linear-gradient(145deg, #14B8A6, #0F766E 55%, #115E59);
+  display:grid; place-items:center;
+  font-size:18px;
+  box-shadow:0 0 0 1px rgba(255,255,255,.08) inset, 0 8px 20px rgba(15,118,110,.35);
+  flex-shrink:0;
+}
+.brand h1 {
+  font-size:17px;
+  font-weight:700;
+  letter-spacing:.02em;
+  line-height:1.25;
+}
+.brand .ver {
+  display:inline-block;
+  margin-left:6px;
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:500;
+  color:#8FD5CC;
+  letter-spacing:.08em;
+  vertical-align:middle;
+}
+.tagline {
+  font-size:12px;
+  color:#8FA6B3;
+  margin:0 0 28px 54px;
+  letter-spacing:.02em;
+}
+
+.side-label {
+  font-family:var(--mono);
+  font-size:10px;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:#7A93A1;
+  margin:0 0 12px;
+}
+
+/* Agent 航线时间轴 */
+.agent-rail {
+  position:relative;
+  margin:0 0 28px 6px;
+  padding-left:18px;
+}
+.agent-rail::before {
+  content:"";
+  position:absolute;
+  left:5px; top:10px; bottom:10px;
+  width:2px;
+  background:linear-gradient(180deg, rgba(143,213,204,.55), rgba(255,255,255,.08));
+  border-radius:2px;
+}
+.agent-item {
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:9px 12px;
+  margin-bottom:8px;
+  background:rgba(255,255,255,.03);
+  border:1px solid var(--line-dark);
+  border-radius:var(--r-sm);
+  font-size:13px;
+  color:#A8BCC8;
+  transition:background .2s, border-color .2s, color .2s, transform .2s;
+}
+.agent-item::before {
+  content:"";
+  position:absolute;
+  left:-18px;
+  top:50%;
+  width:12px; height:12px;
+  margin-top:-6px;
+  border-radius:50%;
+  background:#1A3A4A;
+  border:2px solid #3D6A7C;
+  box-sizing:border-box;
+}
+.agent-item.active {
+  background:rgba(20,184,166,.1);
+  border-color:rgba(20,184,166,.45);
+  color:#D5F5F0;
+}
+.agent-item.active::before {
+  background:#14B8A6;
+  border-color:#99F6E4;
+  box-shadow:0 0 0 4px rgba(20,184,166,.2);
+  animation:pulse 1.6s ease-in-out infinite;
+}
+.agent-item.done {
+  background:rgba(21,128,61,.12);
+  border-color:rgba(134,239,172,.28);
+  color:#BBF7D0;
+}
+.agent-item.done::before {
+  background:#22C55E;
+  border-color:#86EFAC;
+}
+.agent-item .check { margin-left:auto; opacity:0; font-size:12px; }
+.agent-item.done .check { opacity:1; }
+@keyframes pulse {
+  0%,100%{ box-shadow:0 0 0 3px rgba(20,184,166,.15); }
+  50%{ box-shadow:0 0 0 7px rgba(20,184,166,.08); }
+}
+
+/* 表单 */
+.form-group { margin-bottom:14px; }
+.form-group label {
+  display:block;
+  font-size:12px;
+  font-weight:600;
+  color:#B7C9D3;
+  margin-bottom:6px;
+  letter-spacing:.02em;
+}
+.form-group input,
+.form-group select {
+  width:100%;
+  padding:11px 12px;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:var(--r-sm);
+  font-size:14px;
+  color:#F1F7FA;
+  background:rgba(0,0,0,.22);
+  outline:none;
+  transition:border-color .15s, box-shadow .15s;
+  font-family:inherit;
+}
+.form-group input::placeholder { color:#6A8494; }
+.form-group input:focus,
+.form-group select:focus {
+  border-color:#2DD4BF;
+  box-shadow:0 0 0 3px rgba(45,212,191,.18);
+}
+.form-group select option { background:#0B1F2A; color:#F1F7FA; }
+.form-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
+.quick-picks { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+.pick {
+  padding:5px 11px;
+  background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.1);
+  border-radius:999px;
+  font-size:12px;
+  color:#A8BCC8;
+  cursor:pointer;
+  transition:all .15s;
+  font-family:var(--mono);
+  letter-spacing:.02em;
+}
+.pick:hover {
+  border-color:#2DD4BF;
+  color:#99F6E4;
+  background:rgba(20,184,166,.12);
+}
+
+.checkbox-row {
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  font-size:13px;
+  color:#B7C9D3;
+  cursor:pointer;
+  padding:10px 12px;
+  border:1px dashed rgba(255,255,255,.12);
+  border-radius:var(--r-sm);
+  background:rgba(255,255,255,.02);
+  margin-bottom:16px;
+}
+.checkbox-row input { width:auto; margin-top:3px; accent-color:#14B8A6; }
+
+.btn-primary {
+  width:100%;
+  padding:13px 16px;
+  background:linear-gradient(135deg, #14B8A6, #0F766E);
+  color:#fff;
+  border:none;
+  border-radius:var(--r-sm);
+  font-size:14px;
+  font-weight:700;
+  letter-spacing:.04em;
+  cursor:pointer;
+  transition:transform .15s, box-shadow .15s, opacity .15s;
+  box-shadow:0 8px 20px rgba(15,118,110,.35);
+}
+.btn-primary:hover:not(:disabled) {
+  transform:translateY(-1px);
+  box-shadow:0 12px 28px rgba(15,118,110,.45);
+}
+.btn-primary:disabled { opacity:.55; cursor:not-allowed; transform:none; }
+.btn-primary:focus-visible {
+  outline:2px solid #99F6E4;
+  outline-offset:2px;
+}
+
+.btn-row { display:flex; gap:8px; margin-top:10px; }
+.btn-ghost {
+  flex:1;
+  padding:9px;
+  background:transparent;
+  color:#A8BCC8;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:var(--r-sm);
+  font-size:12px;
+  cursor:pointer;
+  transition:all .15s;
+  font-family:inherit;
+}
+.btn-ghost:hover {
+  border-color:#2DD4BF;
+  color:#99F6E4;
+}
+
+/* ── 右：阅读区 ── */
+.main {
+  padding:28px 40px 48px;
+  overflow-y:auto;
+  max-width:960px;
+}
+
+.main-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  gap:16px;
+  margin-bottom:20px;
+  padding-bottom:14px;
+  border-bottom:1px solid var(--line);
+}
+.main-header h2 {
+  font-size:22px;
+  font-weight:700;
+  letter-spacing:.01em;
+  color:var(--ink);
+}
+.main-header .meta {
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--haze);
+  letter-spacing:.02em;
+}
+
+.status {
+  padding:11px 14px;
+  border-radius:var(--r-sm);
+  font-size:13px;
+  font-weight:500;
+  margin-bottom:14px;
+  display:none;
+  align-items:center;
+  gap:8px;
+  border:1px solid transparent;
+}
+.status.info {
+  background:var(--route-soft);
+  border-color:#99F6E4;
+  color:var(--route-deep);
+}
+.status.error {
+  background:var(--err-soft);
+  border-color:#FECACA;
+  color:var(--err);
+}
+.status.success {
+  background:var(--ok-soft);
+  border-color:#BBF7D0;
+  color:var(--ok);
+}
+
+.stream-area {
+  display:none;
+  max-height:200px;
+  overflow-y:auto;
+  padding:14px 16px;
+  margin-bottom:14px;
+  background:#0B1F2A;
+  color:#B8D0DB;
+  border-radius:var(--r);
+  font-family:var(--mono);
+  font-size:12px;
+  line-height:1.65;
+  white-space:pre-wrap;
+  border:1px solid #1A3A4A;
+}
+.stream-area.md { font-family:var(--sans); font-size:13px; color:var(--ink-text); background:var(--card); border-color:var(--line); }
+
+.result-card {
+  background:var(--card);
+  border:1px solid var(--line);
+  border-radius:var(--r);
+  padding:28px 32px;
+  box-shadow:var(--shadow);
+  display:none;
+}
+
+.result-badge {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 12px;
+  border-radius:999px;
+  font-family:var(--mono);
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:.06em;
+  margin-bottom:14px;
+  background:var(--ok-soft);
+  color:var(--ok);
+  border:1px solid #BBF7D0;
+}
+.result-badge.is-skeleton {
+  background:var(--sun-soft);
+  color:var(--sun);
+  border-color:#FDBA74;
+}
+.result-badge.is-running {
+  background:var(--route-soft);
+  color:var(--route-deep);
+  border-color:#99F6E4;
+}
+.result-badge.is-done {
+  background:var(--ok-soft);
+  color:var(--ok);
+  border-color:#BBF7D0;
+}
+
+.result-meta {
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--haze);
+  margin-bottom:18px;
+  padding-bottom:14px;
+  border-bottom:1px solid var(--line);
+  letter-spacing:.02em;
+}
+
+.result-content {
+  font-size:14.5px;
+  line-height:1.8;
+  color:var(--ink-text);
+}
+.result-content h1 {
+  font-size:22px;
+  font-weight:700;
+  margin:28px 0 12px;
+  color:var(--ink);
+  letter-spacing:.01em;
+}
+.result-content h1:first-child { margin-top:0; }
+.result-content h2 {
+  font-size:17px;
+  font-weight:700;
+  margin:24px 0 10px;
+  color:var(--route-deep);
+  padding-left:10px;
+  border-left:3px solid var(--route);
+}
+.result-content h3 {
+  font-size:15px;
+  font-weight:650;
+  margin:18px 0 8px;
+  color:var(--ink);
+}
+.result-content strong { color:var(--ink); font-weight:650; }
+.result-content ul, .result-content ol { padding-left:20px; margin:8px 0; }
+.result-content li { margin-bottom:4px; }
+.result-content table {
+  width:100%;
+  border-collapse:collapse;
+  margin:12px 0;
+  font-size:13px;
+}
+.result-content th, .result-content td {
+  border:1px solid var(--line);
+  padding:8px 10px;
+  text-align:left;
+}
+.result-content th { background:#F0EBE1; font-weight:650; }
+.result-content code {
+  font-family:var(--mono);
+  font-size:12px;
+  background:#F0EBE1;
+  padding:1px 5px;
+  border-radius:4px;
+}
+
+.empty-state {
+  text-align:center;
+  padding:88px 24px 64px;
+  color:var(--haze);
+}
+.empty-state .icon {
+  width:72px; height:72px;
+  margin:0 auto 18px;
+  border-radius:50%;
+  background:var(--card);
+  border:1px solid var(--line);
+  display:grid; place-items:center;
+  font-size:28px;
+  box-shadow:var(--shadow);
+}
+.empty-state h3 {
+  font-size:18px;
+  font-weight:700;
+  color:var(--ink);
+  margin-bottom:6px;
+}
+.empty-state p { font-size:13px; max-width:320px; margin:0 auto; }
+
+/* 聊天 / 反馈 / 地图 */
+.chat-section,
+.feedback-section,
+.map-section {
+  background:var(--card);
+  border:1px solid var(--line);
+  border-radius:var(--r);
+  padding:20px 22px;
+  margin-top:18px;
+  display:none;
+  box-shadow:var(--shadow);
+}
+.feedback-section.show,
+.map-section.show { display:block; }
+.chat-section h4,
+.feedback-section h4,
+.map-header h4 {
+  font-size:14px;
+  font-weight:700;
+  margin-bottom:12px;
+  color:var(--ink);
+}
+
+.chat-box {
+  max-height:320px;
+  overflow-y:auto;
+  margin-bottom:12px;
+  padding:12px;
+  background:var(--paper);
+  border-radius:var(--r-sm);
+  border:1px solid var(--line);
+}
+.chat-msg {
+  padding:10px 14px;
+  margin-bottom:8px;
+  border-radius:var(--r-sm);
+  font-size:13px;
+  line-height:1.65;
+  white-space:pre-wrap;
+}
+.chat-msg.user {
+  background:var(--route-soft);
+  border:1px solid #99F6E4;
+  margin-left:28px;
+}
+.chat-msg.assistant {
+  background:#FFF7ED;
+  border:1px solid #FED7AA;
+  margin-right:28px;
+}
+.chat-msg .role {
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  margin-bottom:3px;
+  text-transform:uppercase;
+}
+.chat-msg.user .role { color:var(--route-deep); }
+.chat-msg.assistant .role { color:var(--sun); }
+
+.chat-input { display:flex; gap:8px; }
+.chat-input input {
+  flex:1;
+  padding:11px 14px;
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  font-size:14px;
+  outline:none;
+  background:var(--paper);
+  font-family:inherit;
+}
+.chat-input input:focus {
+  border-color:var(--route);
+  box-shadow:0 0 0 3px rgba(15,118,110,.15);
+}
+.chat-input button,
+.btn-feedback {
+  padding:10px 18px;
+  background:var(--route);
+  color:#fff;
+  border:none;
+  border-radius:var(--r-sm);
+  font-size:13px;
+  font-weight:650;
+  cursor:pointer;
+  transition:background .15s;
+  font-family:inherit;
+}
+.chat-input button:hover,
+.btn-feedback:hover { background:var(--route-deep); }
+.chat-input button:disabled,
+.btn-feedback:disabled { opacity:.5; cursor:not-allowed; }
+
+.star-rating { display:flex; gap:4px; margin-bottom:12px; }
+.star-rating .star {
+  font-size:28px;
+  cursor:pointer;
+  color:var(--line);
+  transition:color .12s;
+  user-select:none;
+}
+.star-rating .star:hover,
+.star-rating .star.active { color:#F59E0B; }
+.feedback-input {
+  width:100%;
+  padding:10px 12px;
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  font-size:13px;
+  resize:vertical;
+  min-height:60px;
+  font-family:inherit;
+  background:var(--paper);
+}
+.feedback-input:focus {
+  outline:none;
+  border-color:var(--route);
+  box-shadow:0 0 0 3px rgba(15,118,110,.15);
+}
+.feedback-actions {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-top:12px;
+  gap:12px;
+}
+.feedback-actions .hint { font-size:12px; color:var(--haze); }
+.feedback-thanks {
+  font-size:14px;
+  color:var(--ok);
+  font-weight:600;
+  padding:8px 0;
+  display:none;
+}
+.feedback-thanks.show { display:block; }
+
+.map-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:10px;
+  gap:12px;
+  flex-wrap:wrap;
+}
+.map-legend { display:flex; gap:12px; font-size:12px; color:var(--haze); flex-wrap:wrap; }
+.map-legend .legend-item { display:flex; align-items:center; gap:5px; font-family:var(--mono); }
+.map-legend .legend-dot { width:10px; height:10px; border-radius:50%; }
+#routeMap {
+  height:380px;
+  width:100%;
+  border-radius:var(--r-sm);
+  border:1px solid var(--line);
+  overflow:hidden;
+}
+
+.footer {
+  text-align:center;
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--haze-2);
+  margin-top:36px;
+  padding-top:16px;
+  border-top:1px solid var(--line);
+  letter-spacing:.04em;
+}
+
+/* 抽屉 */
+.dock {
+  position:fixed;
+  right:16px;
+  bottom:16px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  z-index:40;
+}
+.dock-btn {
+  width:44px; height:44px;
+  border-radius:14px;
+  background:var(--ink);
+  color:#E7EEF2;
+  border:1px solid rgba(255,255,255,.08);
+  box-shadow:var(--shadow-lg);
+  cursor:pointer;
+  display:grid;
+  place-items:center;
+  font-size:16px;
+  transition:transform .15s, background .15s;
+}
+.dock-btn:hover { transform:translateY(-2px); background:var(--panel); }
+.dock-btn:focus-visible { outline:2px solid #2DD4BF; outline-offset:2px; }
+
+.drawer {
+  position:fixed;
+  right:0; top:0; bottom:0;
+  width:min(380px, 100vw);
+  background:var(--card);
+  border-left:1px solid var(--line);
+  box-shadow:var(--shadow-lg);
+  transform:translateX(105%);
+  transition:transform .28s ease;
+  z-index:50;
+  overflow-y:auto;
+  padding:22px;
+}
+.drawer.open { transform:translateX(0); }
+.drawer h4 {
+  font-size:15px;
+  font-weight:700;
+  margin-bottom:14px;
+  color:var(--ink);
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.history-card,
+.memory-card,
+.eval-history-card {
+  padding:12px;
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  margin-bottom:8px;
+  cursor:pointer;
+  transition:border-color .15s, transform .15s;
+}
+.history-card:hover,
+.eval-history-card:hover {
+  border-color:var(--route);
+  transform:translateX(-2px);
+}
+.history-card .dest { font-weight:700; font-size:14px; color:var(--ink); }
+.history-card .info { font-size:12px; color:var(--haze); margin-top:3px; font-family:var(--mono); }
+
+.memory-count { font-size:11px; color:var(--haze); font-weight:400; font-family:var(--mono); }
+.memory-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+.mem-filter-btn {
+  padding:5px 12px;
+  font-size:12px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:var(--paper);
+  cursor:pointer;
+  color:var(--haze);
+  transition:all .15s;
+  font-family:inherit;
+}
+.mem-filter-btn.active {
+  background:var(--route);
+  color:#fff;
+  border-color:var(--route);
+}
+.mem-filter-btn:hover:not(.active) {
+  border-color:var(--route);
+  color:var(--route);
+}
+.memory-list { display:flex; flex-direction:column; gap:8px; }
+.memory-card { cursor:default; position:relative; }
+.memory-card:hover { border-color:#99F6E4; }
+.memory-card .mem-type {
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:2px 7px;
+  border-radius:4px;
+  display:inline-block;
+  margin-bottom:6px;
+}
+.memory-card .mem-type.fact { background:var(--route-soft); color:var(--route-deep); }
+.memory-card .mem-type.preference { background:var(--sun-soft); color:var(--sun); }
+.memory-card .mem-type.interaction { background:var(--ok-soft); color:var(--ok); }
+.memory-card .mem-content { font-size:13px; line-height:1.55; color:var(--ink-text); }
+.memory-card .mem-meta {
+  font-size:11px;
+  color:var(--haze);
+  margin-top:8px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:var(--mono);
+}
+.memory-card .mem-delete {
+  font-size:11px;
+  color:var(--err);
+  cursor:pointer;
+  opacity:0;
+  transition:opacity .15s;
+  background:none;
+  border:none;
+  font-family:inherit;
+}
+.memory-card:hover .mem-delete { opacity:1; }
+.memory-empty {
+  text-align:center;
+  color:var(--haze);
+  font-size:13px;
+  padding:36px 12px;
+}
+
+/* 评测 */
+.eval-actions { display:flex; gap:8px; margin-bottom:14px; }
+.eval-run-btn {
+  padding:8px 14px;
+  font-size:13px;
+  font-weight:650;
+  background:var(--route);
+  color:#fff;
+  border:none;
+  border-radius:var(--r-sm);
+  cursor:pointer;
+  white-space:nowrap;
+  font-family:inherit;
+}
+.eval-run-btn:hover { background:var(--route-deep); }
+.eval-run-btn:disabled { opacity:.5; cursor:not-allowed; }
+.eval-select {
+  flex:1;
+  padding:8px 10px;
+  font-size:13px;
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  background:var(--paper);
+  color:var(--ink-text);
+  font-family:inherit;
+}
+.eval-loading {
+  display:none;
+  align-items:center;
+  gap:10px;
+  padding:14px;
+  color:var(--haze);
+  font-size:13px;
+}
+.eval-spinner {
+  width:18px; height:18px;
+  border:2px solid var(--line);
+  border-top-color:var(--route);
+  border-radius:50%;
+  animation:spin .8s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.eval-summary {
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  padding:16px;
+  margin-bottom:12px;
+}
+.eval-score-row { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.eval-score-label { font-size:12px; color:var(--haze); width:56px; flex-shrink:0; }
+.eval-score-bar { flex:1; height:7px; background:var(--line); border-radius:4px; overflow:hidden; }
+.eval-score-fill { height:100%; border-radius:4px; transition:width .45s ease; }
+.eval-score-val { font-size:13px; font-weight:700; width:32px; text-align:right; font-family:var(--mono); }
+.eval-big-score { text-align:center; padding:10px 0 14px; }
+.eval-big-score .num { font-size:40px; font-weight:800; font-family:var(--mono); line-height:1; }
+.eval-big-score .lbl { font-size:11px; color:var(--haze); margin-top:6px; letter-spacing:.08em; font-family:var(--mono); }
+.eval-pass-rate { text-align:center; font-size:12px; color:var(--haze); margin-bottom:12px; }
+.eval-regression {
+  padding:12px;
+  border-radius:var(--r-sm);
+  margin-bottom:12px;
+  font-size:12px;
+}
+.eval-regression.ok {
+  background:var(--ok-soft);
+  border:1px solid #BBF7D0;
+  color:var(--ok);
+}
+.eval-regression.warn {
+  background:var(--sun-soft);
+  border:1px solid #FED7AA;
+  color:var(--sun);
+}
+.eval-history { display:flex; flex-direction:column; gap:8px; }
+.eval-history-card { cursor:pointer; }
+.eval-history-card .eh-name { font-size:13px; font-weight:650; color:var(--ink); }
+.eval-history-card .eh-info {
+  font-size:11px;
+  color:var(--haze);
+  margin-top:4px;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  font-family:var(--mono);
+}
+
+@media (max-width: 900px) {
+  .app { grid-template-columns:1fr; }
+  .sidebar {
+    position:relative;
+    height:auto;
+    border-right:none;
+    border-bottom:1px solid rgba(0,0,0,.2);
+  }
+  .main { padding:20px 16px 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">✈</div>
+      <div>
+        <h1>航迹 <span class="ver">PLANNER v4</span></h1>
+      </div>
+    </div>
+    <p class="tagline">Function Calling · 骨架优先 · 可消融多 Agent</p>
+
+    <div class="side-label">Agent 航线</div>
+    <div class="agent-rail" id="agentList">
+      <div class="agent-item" id="agent-researcher"><span>目的地研究员</span><span class="check">✓</span></div>
+      <div class="agent-item" id="agent-planner"><span>行程规划师</span><span class="check">✓</span></div>
+      <div class="agent-item" id="agent-budget"><span>预算分析师</span><span class="check">✓</span></div>
+      <div class="agent-item" id="agent-foodie"><span>美食推荐官</span><span class="check">✓</span></div>
+      <div class="agent-item" id="agent-safety"><span>安全顾问</span><span class="check">✓</span></div>
+    </div>
+
+    <div class="side-label">行程参数</div>
+    <div class="form-group">
+      <label for="destination">旅行目的地</label>
+      <input type="text" id="destination" value="东京" placeholder="如：巴黎、首尔、曼谷">
+      <div class="quick-picks">
+        <span class="pick" onclick="setDest('东京')">东京</span>
+        <span class="pick" onclick="setDest('巴黎')">巴黎</span>
+        <span class="pick" onclick="setDest('首尔')">首尔</span>
+        <span class="pick" onclick="setDest('曼谷')">曼谷</span>
+        <span class="pick" onclick="setDest('新加坡')">新加坡</span>
+        <span class="pick" onclick="setDest('伦敦')">伦敦</span>
+        <span class="pick" onclick="setDest('纽约')">纽约</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="days">天数</label>
+        <input type="number" id="days" value="3" min="1" max="30">
+      </div>
+      <div class="form-group">
+        <label for="budget">预算 ($)</label>
+        <input type="number" id="budget" value="1000" min="100" max="50000" step="100">
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="interests">兴趣偏好</label>
+      <input type="text" id="interests" value="文化,美食" placeholder="如：文化,购物,夜景">
+    </div>
+    <div class="form-group">
+      <label for="pipelineMode">执行模式</label>
+      <select id="pipelineMode">
+        <option value="single" selected>单智能体 · 更快更省（默认）</option>
+        <option value="multi">多智能体 · 深度完整</option>
+        <option value="sequential">严格串行 · 调试</option>
+      </select>
+    </div>
+    <label class="checkbox-row" for="progressive">
+      <input type="checkbox" id="progressive" checked>
+      <span>先出本地骨架，再填细节（推荐）</span>
+    </label>
+    <button class="btn-primary" id="submitBtn" onclick="generate()">生成旅行方案</button>
+    <div class="btn-row">
+      <button class="btn-ghost" onclick="exportMarkdown()">导出 Markdown</button>
+      <button class="btn-ghost" onclick="copyResult()">复制结果</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="main-header">
+      <h2>旅行方案</h2>
+      <span class="meta" id="metaInfo">填写参数后点击生成</span>
+    </div>
+
+    <div class="status" id="statusBar"></div>
+    <div class="stream-area" id="streamArea"></div>
+
+    <div class="empty-state" id="emptyState">
+      <div class="icon">🧭</div>
+      <h3>等待生成旅行方案</h3>
+      <p>在左侧填写目的地、天数、预算和兴趣偏好。开启骨架预览可先看到可读提纲。</p>
+    </div>
+
+    <div class="result-card" id="resultCard">
+      <div class="result-badge" id="resultBadge">生成完成</div>
+      <div class="result-meta" id="resultMeta"></div>
+      <div class="result-content" id="resultContent"></div>
+    </div>
+
+    <div class="map-section" id="mapSection">
+      <div class="map-header">
+        <h4>路线地图</h4>
+        <div class="map-legend" id="mapLegend"></div>
+      </div>
+      <div id="routeMap"></div>
+    </div>
+
+    <div class="feedback-section" id="feedbackSection">
+      <h4>为本次规划评分</h4>
+      <div class="star-rating" id="starRating">
+        <span class="star" data-value="1">★</span>
+        <span class="star" data-value="2">★</span>
+        <span class="star" data-value="3">★</span>
+        <span class="star" data-value="4">★</span>
+        <span class="star" data-value="5">★</span>
+      </div>
+      <textarea class="feedback-input" id="feedbackComment" placeholder="说说你的想法（可选）..." rows="3"></textarea>
+      <div class="feedback-actions">
+        <span class="hint">评分会注入后续规划，帮助改进质量</span>
+        <button class="btn-feedback" id="feedbackBtn" onclick="submitFeedback()">提交评价</button>
+      </div>
+      <div class="feedback-thanks" id="feedbackThanks">感谢你的反馈</div>
+    </div>
+
+    <div class="chat-section" id="chatSection">
+      <h4>追问与修改</h4>
+      <div class="chat-box" id="chatBox"></div>
+      <div class="chat-input">
+        <input type="text" id="chatInput" placeholder="如：把第三天换成海边、预算调高到 2000…">
+        <button id="chatBtn" onclick="sendFollowUp()">发送</button>
+      </div>
+    </div>
+
+    <div class="footer">3 层串并行 · GPS 路线 · LP 预算 · 混合 RAG · SSE 骨架 / 断线回放 · 向量记忆</div>
+  </div>
+</div>
+
+<div class="dock">
+  <button class="dock-btn" title="历史记录" onclick="toggleHistory()">📜</button>
+  <button class="dock-btn" title="记忆库" onclick="toggleMemory()">🧠</button>
+  <button class="dock-btn" title="评测中心" onclick="toggleEval()">📊</button>
+</div>
+
+<div class="drawer" id="historyDrawer">
+  <h4>历史记录</h4>
+  <div id="historyList"></div>
+</div>
+
+<div class="drawer" id="memoryDrawer">
+  <h4>记忆库 <span class="memory-count" id="memoryCount"></span></h4>
+  <div class="memory-filter">
+    <button class="mem-filter-btn active" onclick="filterMemories('all', this)">全部</button>
+    <button class="mem-filter-btn" onclick="filterMemories('fact', this)">事实</button>
+    <button class="mem-filter-btn" onclick="filterMemories('preference', this)">偏好</button>
+    <button class="mem-filter-btn" onclick="filterMemories('interaction', this)">历史</button>
+  </div>
+  <div id="memoryList" class="memory-list"></div>
+</div>
+
+<div class="drawer" id="evalDrawer">
+  <h4>评测中心</h4>
+  <div class="eval-actions">
+    <button class="eval-run-btn" id="evalRunBtn" onclick="runEval()">运行评测</button>
+    <select id="evalCaseScope" class="eval-select">
+      <option value="">全部 15 条</option>
+      <option value="T001,T002,T003">快速 3 条</option>
+      <option value="T001,T002,T003,T004,T005,T006,T007">标准 7 条</option>
+    </select>
+  </div>
+  <div id="evalLoading" class="eval-loading">
+    <div class="eval-spinner"></div>
+    <span>评测中，请稍候…</span>
+  </div>
+  <div id="evalSummary" class="eval-summary"></div>
+  <div id="evalRegression" class="eval-regression"></div>
+  <h4 style="margin-top:16px">历史评测</h4>
+  <div id="evalHistory" class="eval-history"></div>
+</div>
+
+<script>
+let currentResult = '';
+let currentMeta = {};
+let currentPlanId = '';
+
+function setDest(d) { document.getElementById('destination').value = d; }
+
+function setStatus(msg, type = 'info') {
+  const el = document.getElementById('statusBar');
+  el.style.display = 'flex';
+  el.className = 'status ' + type;
+  el.textContent = msg;
+}
+
+function setBadge(text, kind) {
+  const el = document.getElementById('resultBadge');
+  el.textContent = text;
+  el.className = 'result-badge' + (kind ? ' is-' + kind : '');
+}
+
+function resetAgents() {
+  document.querySelectorAll('.agent-item').forEach(a => a.classList.remove('active', 'done'));
+}
+
+function setAgentState(name, state) {
+  const el = document.getElementById('agent-' + name);
+  if (!el) return;
+  el.classList.remove('active', 'done');
+  if (state) el.classList.add(state);
+}
+
+async function generate() {
+  const dest = document.getElementById('destination').value.trim();
+  const days = parseInt(document.getElementById('days').value);
+  const budget = parseFloat(document.getElementById('budget').value);
+  const interests = document.getElementById('interests').value.trim();
+  const mode = document.getElementById('pipelineMode').value || 'single';
+  const progressive = document.getElementById('progressive').checked;
+  if (!dest) { alert('请输入目的地'); return; }
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = '生成中…';
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('resultCard').style.display = 'none';
+  setBadge('生成中', 'running');
+  document.getElementById('streamArea').style.display = 'none';
+  document.getElementById('streamArea').textContent = '';
+  document.getElementById('streamArea').classList.remove('md');
+  document.getElementById('chatSection').style.display = 'none';
+  document.getElementById('chatBox').innerHTML = '';
+  document.getElementById('feedbackSection').classList.remove('show');
+  document.getElementById('mapSection').classList.remove('show');
+  currentPlanId = '';
+  resetAgents();
+
+  currentMeta = { dest, days, budget };
+  document.getElementById('metaInfo').textContent = `${dest} · ${days}天 · $${budget} · ${mode}`;
+
+  try {
+    setStatus(progressive ? '正在生成本地骨架…' : '正在启动 AI Agent…', 'info');
+    if (mode !== 'single') setAgentState('researcher', 'active');
+
+    const resp = await fetch('/api/plan/stream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ destination: dest, days, budget, interests, mode, progressive })
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const agentOrder = ['researcher', 'planner', 'budget', 'foodie', 'safety'];
+    const completedAgents = new Set();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(data);
+          if (ev.type === 'status') { setStatus(ev.message); }
+          else if (ev.type === 'skeleton') {
+            const card = document.getElementById('resultCard');
+            card.style.display = 'block';
+            setBadge('骨架预览', 'skeleton');
+            document.getElementById('resultMeta').textContent =
+              `${dest} · ${days}天 · $${budget} · 本地骨架 · AI 填充中`;
+            document.getElementById('resultContent').innerHTML = formatMarkdown(ev.content);
+            setStatus(ev.message || '骨架已生成，AI 正在填充…', 'info');
+          }
+          else if (ev.type === 'thought') {
+            const sa = document.getElementById('streamArea');
+            sa.classList.remove('md');
+            if (sa.style.display === 'none' || !sa.style.display) {
+              sa.style.display = 'block'; sa.textContent = '';
+            }
+            sa.textContent += '\n[think] ' + ev.agent + ' · ' + ev.content + '\n';
+            sa.scrollTop = sa.scrollHeight;
+          }
+          else if (ev.type === 'action') {
+            const sa = document.getElementById('streamArea');
+            sa.classList.remove('md');
+            sa.textContent += '[tool]  ' + ev.agent + ' · ' + ev.content + '\n';
+            sa.scrollTop = sa.scrollHeight;
+          }
+          else if (ev.type === 'observation') {
+            const sa = document.getElementById('streamArea');
+            sa.classList.remove('md');
+            sa.textContent += '[obs]   ' + (ev.content || '').substring(0, 120) + '…\n\n';
+            sa.scrollTop = sa.scrollHeight;
+          }
+          else if (ev.type === 'token') {
+            const sa = document.getElementById('streamArea');
+            sa.classList.add('md');
+            if (sa.style.display === 'none' || !sa.style.display) {
+              sa.style.display = 'block'; sa.innerHTML = '';
+              window._tokenBuffer = '';
+            }
+            window._tokenBuffer += ev.token;
+            if (window._tokenBuffer.length > 20 || ev.token.includes('\n')) {
+              sa.innerHTML = formatMarkdown(window._tokenBuffer);
+              window._tokenBuffer = '';
+            }
+            sa.scrollTop = sa.scrollHeight;
+          }
+          else if (ev.type === 'agent_done') {
+            if (ev.agent) {
+              completedAgents.add(ev.agent);
+              setAgentState(ev.agent, 'done');
+              const next = agentOrder.find(a => !completedAgents.has(a));
+              if (next) setAgentState(next, 'active');
+            }
+            document.getElementById('streamArea').style.display = 'none';
+            document.getElementById('streamArea').textContent = '';
+            setStatus(ev.message);
+          }
+          else if (ev.type === 'final') {
+            currentResult = ev.content;
+            agentOrder.forEach(a => setAgentState(a, 'done'));
+            setStatus('生成完成', 'success');
+            if (ev.plan_id) {
+              currentPlanId = ev.plan_id;
+              document.getElementById('chatSection').style.display = 'block';
+            }
+            document.getElementById('resultCard').style.display = 'block';
+            setBadge('生成完成', 'done');
+            document.getElementById('resultMeta').textContent =
+              `${dest} · ${days}天 · $${budget} · ${new Date().toLocaleString()}`;
+            document.getElementById('resultContent').innerHTML = formatMarkdown(ev.content);
+            document.getElementById('feedbackSection').classList.add('show');
+            resetFeedback();
+            renderRouteMap(dest, days);
+          }
+          else if (ev.type === 'error') { setStatus(ev.message, 'error'); }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {
+    setStatus('网络错误: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '生成旅行方案';
+  }
+}
+
+function formatMarkdown(text) {
+  if (typeof marked !== 'undefined') {
+    marked.setOptions({ breaks: true, gfm: true });
+    return marked.parse(text);
+  }
+  return text
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^\- (.+)$/gm, '<ul><li>$1</li></ul>')
+    .replace(/(<\/ul>\n<ul>)/g, '')
+    .replace(/\n/g, '<br>');
+}
+
+function exportMarkdown() {
+  if (!currentResult) { alert('请先生成方案'); return; }
+  const md = `# ${currentMeta.dest} 旅行规划\n\n- 天数: ${currentMeta.days} 天\n- 预算: $${currentMeta.budget}\n- 时间: ${new Date().toLocaleString()}\n\n---\n\n${currentResult}`;
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `${currentMeta.dest}_规划.md`; a.click();
+}
+
+function copyResult() {
+  if (!currentResult) { alert('请先生成方案'); return; }
+  navigator.clipboard.writeText(currentResult).then(() => {
+    setStatus('已复制到剪贴板', 'success');
+    setTimeout(() => { document.getElementById('statusBar').style.display = 'none'; }, 2000);
+  });
+}
+
+function toggleHistory() {
+  const d = document.getElementById('historyDrawer');
+  document.getElementById('memoryDrawer').classList.remove('open');
+  document.getElementById('evalDrawer').classList.remove('open');
+  d.classList.toggle('open');
+  if (d.classList.contains('open')) loadHistory();
+}
+
+async function loadHistory() {
+  try {
+    const resp = await fetch('/api/history?limit=10');
+    const data = await resp.json();
+    const list = document.getElementById('historyList');
+    if (!data.records || data.records.length === 0) {
+      list.innerHTML = '<div class="memory-empty">暂无记录</div>';
+      return;
+    }
+    list.innerHTML = data.records.map(r => `
+      <div class="history-card" onclick="viewHistory('${r.id}')">
+        <div class="dest">${r.destination}</div>
+        <div class="info">${r.days}天 · $${r.budget} · ${r.created_at.slice(0,10)}</div>
+      </div>`).join('');
+  } catch (e) { console.error(e); }
+}
+
+async function viewHistory(id) {
+  try {
+    const resp = await fetch(`/api/history/${id}`);
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      const r = data.record;
+      currentResult = r.result;
+      currentMeta = { dest: r.destination, days: r.days, budget: r.budget };
+      document.getElementById('emptyState').style.display = 'none';
+      document.getElementById('resultCard').style.display = 'block';
+      setBadge('历史方案', 'done');
+      document.getElementById('resultMeta').textContent = `${r.destination} · ${r.days}天 · $${r.budget} · ${r.created_at}`;
+      document.getElementById('resultContent').innerHTML = formatMarkdown(r.result);
+      document.getElementById('metaInfo').textContent = `${r.destination} · ${r.days}天 · $${r.budget}`;
+      document.getElementById('historyDrawer').classList.remove('open');
+    }
+  } catch (e) { console.error(e); }
+}
+
+async function sendFollowUp() {
+  const input = document.getElementById('chatInput');
+  const msg = input.value.trim();
+  if (!msg || !currentPlanId) return;
+  const btn = document.getElementById('chatBtn');
+  btn.disabled = true; btn.textContent = '…'; input.value = '';
+  appendMsg('user', msg);
+  try {
+    const resp = await fetch('/api/plan/followup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: currentPlanId, message: msg, language: '中文' })
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      appendMsg('assistant', data.reply);
+      currentResult = data.reply;
+      document.getElementById('resultContent').innerHTML = formatMarkdown(data.reply);
+    } else {
+      appendMsg('assistant', '错误: ' + (data.reply || '请求失败'));
+    }
+  } catch (e) {
+    appendMsg('assistant', '网络错误: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '发送';
+  }
+}
+
+function appendMsg(role, content) {
+  const box = document.getElementById('chatBox');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + role;
+  const label = role === 'user' ? '你' : 'AI 助手';
+  div.innerHTML = `<div class="role">${label}</div>${escapeHtml(content)}`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div'); d.textContent = text; return d.innerHTML;
+}
+
+document.getElementById('chatInput')?.addEventListener('keydown', e => { if (e.key === 'Enter') sendFollowUp(); });
+document.querySelectorAll('.sidebar input').forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') generate(); }));
+
+let feedbackRating = 0;
+
+function resetFeedback() {
+  feedbackRating = 0;
+  document.getElementById('feedbackComment').value = '';
+  document.getElementById('feedbackThanks').classList.remove('show');
+  document.getElementById('feedbackBtn').disabled = false;
+  document.getElementById('feedbackBtn').textContent = '提交评价';
+  document.querySelectorAll('#starRating .star').forEach(s => s.classList.remove('active'));
+}
+
+document.querySelectorAll('#starRating .star').forEach(star => {
+  star.addEventListener('click', () => {
+    feedbackRating = parseInt(star.dataset.value);
+    document.querySelectorAll('#starRating .star').forEach(s => {
+      s.classList.toggle('active', parseInt(s.dataset.value) <= feedbackRating);
+    });
+  });
+  star.addEventListener('mouseenter', () => {
+    const val = parseInt(star.dataset.value);
+    document.querySelectorAll('#starRating .star').forEach(s => {
+      s.classList.toggle('active', parseInt(s.dataset.value) <= val);
+    });
+  });
+});
+document.getElementById('starRating')?.addEventListener('mouseleave', () => {
+  document.querySelectorAll('#starRating .star').forEach(s => {
+    s.classList.toggle('active', parseInt(s.dataset.value) <= feedbackRating);
+  });
+});
+
+async function submitFeedback() {
+  if (!feedbackRating) { alert('请先选择评分'); return; }
+  if (!currentPlanId) { alert('没有可评价的方案'); return; }
+  const btn = document.getElementById('feedbackBtn');
+  btn.disabled = true; btn.textContent = '提交中…';
+  try {
+    const resp = await fetch(`/api/plan/${currentPlanId}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rating: feedbackRating,
+        comment: document.getElementById('feedbackComment').value.trim()
+      })
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      document.getElementById('feedbackThanks').classList.add('show');
+      btn.textContent = '已提交';
+    } else {
+      alert('提交失败: ' + (data.detail || '未知错误'));
+      btn.disabled = false; btn.textContent = '提交评价';
+    }
+  } catch (e) {
+    alert('网络错误: ' + e.message);
+    btn.disabled = false; btn.textContent = '提交评价';
+  }
+}
+
+const DAY_COLORS = ['#0F766E', '#C2410C', '#1D4ED8', '#7C3AED', '#B45309', '#0E7490', '#BE185D', '#4D7C0F'];
+let routeMap = null;
+
+async function renderRouteMap(destination, days) {
+  const section = document.getElementById('mapSection');
+  const legend = document.getElementById('mapLegend');
+
+  try {
+    const resp = await fetch(`/api/plan/route/${encodeURIComponent(destination)}?days=${days}`);
+    const data = await resp.json();
+    if (data.status !== 'ok' || !data.route || data.route.error) {
+      section.classList.remove('show');
+      return;
+    }
+
+    const route = data.route;
+    const dailyRoutes = route.daily_routes;
+    if (!dailyRoutes || dailyRoutes.length === 0) {
+      section.classList.remove('show');
+      return;
+    }
+
+    section.classList.add('show');
+
+    if (routeMap) { routeMap.remove(); routeMap = null; }
+    const mapDiv = document.getElementById('routeMap');
+    mapDiv.innerHTML = '';
+    routeMap = L.map('routeMap');
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap',
+      maxZoom: 18,
+    }).addTo(routeMap);
+
+    const allCoords = [];
+    legend.innerHTML = '';
+
+    dailyRoutes.forEach((dayRoute, dayIdx) => {
+      const color = DAY_COLORS[dayIdx % DAY_COLORS.length];
+      const dayLabel = `Day ${dayIdx + 1}`;
+      legend.innerHTML += `<span class="legend-item"><span class="legend-dot" style="background:${color}"></span>${dayLabel}</span>`;
+
+      const dayCoords = [];
+      dayRoute.forEach((attr, i) => {
+        if (!attr.lat || !attr.lng) return;
+        const latLng = [attr.lat, attr.lng];
+        dayCoords.push(latLng);
+        allCoords.push(latLng);
+
+        const icon = L.divIcon({
+          className: 'custom-marker',
+          html: `<div style="
+            background:${color}; color:#fff; border-radius:50%;
+            width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+            font-size:12px; font-weight:700; border:2px solid #fff;
+            box-shadow:0 2px 6px rgba(0,0,0,0.3); font-family:Consolas,monospace;
+          ">${i + 1}</div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+        });
+
+        const marker = L.marker(latLng, { icon }).addTo(routeMap);
+        marker.bindPopup(`
+          <div style="font-size:13px;line-height:1.5">
+            <b>${dayLabel} · ${attr.name}</b><br>
+            类型：${attr.type}<br>
+            门票：${attr.ticket}<br>
+            游览：${attr.duration}
+            ${attr.tip ? '<br>提示：' + attr.tip : ''}
+          </div>
+        `);
+      });
+
+      if (dayCoords.length > 1) {
+        L.polyline(dayCoords, {
+          color: color, weight: 3, opacity: 0.85, dashArray: dayIdx > 0 ? '8 4' : null,
+        }).addTo(routeMap);
+      }
+    });
+
+    if (allCoords.length > 0) {
+      routeMap.fitBounds(allCoords, { padding: [30, 30] });
+    }
+  } catch (e) {
+    console.error('地图加载失败:', e);
+    section.classList.remove('show');
+  }
+}
+
+let memoryData = [];
+let memoryFilter = 'all';
+
+function toggleMemory() {
+  const drawer = document.getElementById('memoryDrawer');
+  const isOpen = drawer.classList.contains('open');
+  document.getElementById('historyDrawer').classList.remove('open');
+  document.getElementById('evalDrawer').classList.remove('open');
+  drawer.classList.toggle('open');
+  if (!isOpen) loadMemories();
+}
+
+function filterMemories(type, btn) {
+  memoryFilter = type;
+  document.querySelectorAll('.mem-filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderMemories();
+}
+
+async function loadMemories() {
+  try {
+    const res = await fetch('/api/plan/memories');
+    const data = await res.json();
+    if (data.status === 'ok') {
+      memoryData = data.memories || [];
+      document.getElementById('memoryCount').textContent = `共 ${memoryData.length} 条`;
+      renderMemories();
+    }
+  } catch (e) {
+    console.error('加载记忆失败:', e);
+    document.getElementById('memoryList').innerHTML = '<div class="memory-empty">加载失败</div>';
+  }
+}
+
+function renderMemories() {
+  const list = document.getElementById('memoryList');
+  const filtered = memoryFilter === 'all'
+    ? memoryData
+    : memoryData.filter(m => m.memory_type === memoryFilter);
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="memory-empty">暂无记忆<br><small>AI 会在规划过程中自动学习你的偏好</small></div>';
+    return;
+  }
+
+  const typeLabels = { fact: '事实', preference: '偏好', interaction: '历史' };
+  list.innerHTML = filtered.map(m => `
+    <div class="memory-card">
+      <span class="mem-type ${m.memory_type}">${typeLabels[m.memory_type] || m.memory_type}</span>
+      <div class="mem-content">${escapeHtml(m.content)}</div>
+      <div class="mem-meta">
+        <span>${m.destination ? '📍 ' + escapeHtml(m.destination) : ''} ${m.created_at ? '· ' + m.created_at.slice(0, 10) : ''}</span>
+        <button class="mem-delete" onclick="deleteMemory('${m.id}')">删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function deleteMemory(id) {
+  if (!confirm('确认删除这条记忆？')) return;
+  try {
+    const res = await fetch(`/api/plan/memories/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      memoryData = memoryData.filter(m => m.id !== id);
+      document.getElementById('memoryCount').textContent = `共 ${memoryData.length} 条`;
+      renderMemories();
+    }
+  } catch (e) {
+    alert('删除失败');
+  }
+}
+
+function toggleEval() {
+  const drawer = document.getElementById('evalDrawer');
+  const isOpen = drawer.classList.contains('open');
+  document.getElementById('historyDrawer').classList.remove('open');
+  document.getElementById('memoryDrawer').classList.remove('open');
+  drawer.classList.toggle('open');
+  if (!isOpen) loadEvalHistory();
+}
+
+function scoreColor(score) {
+  if (score >= 70) return 'var(--ok)';
+  if (score >= 50) return 'var(--sun)';
+  return 'var(--err)';
+}
+
+function renderScoreBar(label, score) {
+  return `
+    <div class="eval-score-row">
+      <span class="eval-score-label">${label}</span>
+      <div class="eval-score-bar"><div class="eval-score-fill" style="width:${score}%;background:${scoreColor(score)}"></div></div>
+      <span class="eval-score-val" style="color:${scoreColor(score)}">${score}</span>
+    </div>`;
+}
+
+function renderEvalSummary(evalData) {
+  if (!evalData || !evalData.summary) return '';
+  const s = evalData.summary;
+  const passPct = Math.round((s.pass_rate || 0) * 100);
+  return `
+    <div class="eval-big-score">
+      <div class="num" style="color:${scoreColor(s.avg_overall)}">${Math.round(s.avg_overall)}</div>
+      <div class="lbl">综合评分</div>
+    </div>
+    <div class="eval-pass-rate">通过率 ${passPct}%（${s.evaluated || s.total_cases} 条用例，≥50 分通过）</div>
+    ${renderScoreBar('完整性', Math.round(s.avg_completeness))}
+    ${renderScoreBar('实用性', Math.round(s.avg_practicality))}
+    ${renderScoreBar('结构化', Math.round(s.avg_structure))}
+  `;
+}
+
+function renderRegression(reg) {
+  if (!reg) return '';
+  if (!reg.has_regression) {
+    return '<div class="eval-regression ok">无回归，各项指标稳定</div>';
+  }
+  const items = reg.regressions.map(r =>
+    `<div>⚠ ${r.destination} · ${r.dimension}: ${r.baseline} → ${r.current}（↓${r.drop}）</div>`
+  ).join('');
+  return `<div class="eval-regression warn">${items}</div>`;
+}
+
+async function runEval() {
+  const btn = document.getElementById('evalRunBtn');
+  const loading = document.getElementById('evalLoading');
+  const scope = document.getElementById('evalCaseScope').value;
+
+  btn.disabled = true;
+  loading.style.display = 'flex';
+  document.getElementById('evalSummary').innerHTML = '';
+  document.getElementById('evalRegression').innerHTML = '';
+
+  try {
+    const params = new URLSearchParams();
+    if (scope) params.set('case_ids', scope);
+    const res = await fetch('/api/eval/run?' + params.toString(), { method: 'POST' });
+    const data = await res.json();
+
+    if (data.status === 'ok') {
+      document.getElementById('evalSummary').innerHTML = renderEvalSummary(data.evaluation);
+      document.getElementById('evalRegression').innerHTML = renderRegression(data.regression);
+      loadEvalHistory();
+    } else {
+      document.getElementById('evalSummary').innerHTML = `<div style="color:var(--err)">评测失败: ${escapeHtml(data.message)}</div>`;
+    }
+  } catch (e) {
+    document.getElementById('evalSummary').innerHTML = `<div style="color:var(--err)">请求失败: ${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    loading.style.display = 'none';
+  }
+}
+
+async function loadEvalHistory() {
+  try {
+    const res = await fetch('/api/eval/runs?limit=10');
+    const data = await res.json();
+    const container = document.getElementById('evalHistory');
+
+    if (data.status !== 'ok' || !data.runs || data.runs.length === 0) {
+      container.innerHTML = '<div style="text-align:center;color:var(--haze);font-size:13px;padding:20px">暂无评测记录</div>';
+      return;
+    }
+
+    container.innerHTML = data.runs.map(r => `
+      <div class="eval-history-card" onclick="loadEvalDetail('${r.id}')">
+        <div class="eh-name">${escapeHtml(r.run_name || r.id)}</div>
+        <div class="eh-info">
+          <span>平均 ${Math.round(r.avg_overall)}分</span>
+          <span>通过 ${Math.round(r.pass_rate * 100)}%</span>
+          <span>${r.created_at ? r.created_at.slice(0, 16).replace('T', ' ') : ''}</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    console.error('加载评测历史失败:', e);
+  }
+}
+
+async function loadEvalDetail(runId) {
+  try {
+    const res = await fetch(`/api/eval/run/${runId}`);
+    const data = await res.json();
+    if (data.status === 'ok' && data.evaluation) {
+      document.getElementById('evalSummary').innerHTML = renderEvalSummary(data.evaluation);
+      document.getElementById('evalRegression').innerHTML = '';
+    }
+  } catch (e) {
+    console.error('加载评测详情失败:', e);
+  }
+}
+</script>
+</body>
+</html>
