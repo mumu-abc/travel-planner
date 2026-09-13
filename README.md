@@ -1,0 +1,240 @@
+# AI 旅行规划助手
+
+<!-- 推送到 GitHub 后取消注释并替换 <user>/<repo>：
+[![CI](https://github.com/<user>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/<repo>/actions/workflows/ci.yml)
+-->
+
+> 手搓 OpenAI Function Calling 多 Agent 管线 · 3 层串并行 · 可消融评测 · 混合 RAG（FAISS + Okapi BM25）· GPS 路线优化 · LP 预算 · SSE 断线重连
+
+**这个项目在回答两个问题**：
+1. **体感**：多 Agent 一跑几分钟，用户等不了——骨架优先能否把「可读行程」压进 1 秒？
+2. **价值**：多 Agent 相比单 Agent，质量/延迟/成本到底差多少？值不值？
+
+默认管线是 **single**（按消融数据定的性价比档）；同仓库提供 `multi` / `sequential` / 关反思 等消融模式，用同一套 LLM 评委对比。评测器对**离线降级、评委解析失败、Agent 全失败**的 run 自动隔离，失败 case 不计入平均分（失败明细单独列出），杜绝「0 分污染结论」。
+
+---
+
+## 为什么不是「又一个 travel demo」
+
+| 常见课设问题 | 本项目做法 |
+|-------------|-----------|
+| 只堆 multi-agent 功能，说不清收益 | `mode=single/sequential/multi` 可切换，评测输出对比表 |
+| 知识图谱用列表相邻冒充 | 邻近关系由真实 GPS + Haversine ≤2.5km 计算，并返回距离 |
+| BM25 只是 TF 累加 | Okapi BM25（k1=1.5, b=0.75）+ 标准 IDF |
+| 反思/工具轮次不可控 | `ENABLE_REFLECTION` / `MAX_TOOL_ROUNDS` / `MAX_WEB_SEARCH_CALLS` 可配置 |
+| 评测只报最好一次 | 消融报告按配置分组，失败 case 也写入 |
+
+---
+
+## 架构
+
+```
+POST /api/plan/stream (SSE)
+        │
+        ├─ progressive=true（默认）: 先推本地骨架（知识库+路线+LP，秒级）
+        │
+        ▼
+  RateLimiter（令牌桶 + Semaphore + 指数退避）
+        │
+        ▼
+  mode=multi ──► Router（可关）──► L1 Researcher
+                                      │
+                                      ▼
+                                  L2 Planner
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    ▼                 ▼                 ▼
+                 Budget            Foodie            Safety   ← ThreadPool 并行
+                    │                 │                 │
+                    └─────────────────┴─────────────────┘
+                                      │
+                                      ▼
+                         混合检索 / 路线 / 预算 / 天气 / 汇率
+```
+
+> 上图为 `multi` 深度档的数据流；产品默认 `single` 为单 Agent 覆盖同样 5 板块，工具链相同。
+
+| 模式 | 含义 | 用途 |
+|------|------|------|
+| `single` | 单 Agent 覆盖 5 板块 | **产品默认**（消融实测质量打平、快 ~1.8×/省 ~2.3×） |
+| `multi` | 路由 + 3 层串并行 | 深度档：要五板块齐全时用 |
+| `sequential` | 5 Agent 严格串行 | 消融：去掉并行 |
+
+请求体可传：`mode`、`enable_reflection`、`progressive`（默认 true）。  
+前端可选「先出骨架」和执行模式。
+
+Agent 定义在 `app/agents.py`，执行引擎在 `app/crew.py`，骨架在 `app/skeleton.py`。
+
+---
+
+## 快速开始
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # 填 LLM_API_KEY
+
+# 首次运行需构建知识库索引（FAISS + BM25，约 1 分钟）
+python -m app.knowledge.ingest
+
+python -m uvicorn app.main:app --reload --port 8000
+# 打开 http://localhost:8000
+```
+
+### 骨架优先延迟基准（可复现）
+
+```bash
+python -m eval.latency_bench --n 20 --concurrency 4
+```
+
+2026-09-14 实测（本机，`skeleton_only=true` 纯本地链路，不调 LLM）：
+
+| 指标 | P50 | P95 |
+|------|-----|-----|
+| 首字节 TTFB | 5ms | 16ms |
+| **骨架事件（可读行程可见）** | **803ms** | **1080ms** |
+
+→ 用户点「生成」后 **≈1 秒**看到分日行程骨架；完整 Agent 填充（3–6 分钟）在后台进行，对比「白屏等几分钟」的常见 demo。
+
+### 评测 / 消融（面试前必跑）
+
+```bash
+# 单配置 3 case
+python -m eval.eval_runner --cases 3 --output eval/report.md
+
+# 关反思（更快）
+python -m eval.eval_runner --cases 3 --no-reflection --output eval/report_fast.md
+
+# 消融：multi vs single vs sequential vs multi-no-refl
+python -m eval.eval_runner --cases 3 --ablation --output eval/report_ablation.md
+```
+
+报告含平均分、关键词覆盖、耗时、**~Token / ~成本（字符粗估，仅横向对比）**。  
+评测器内置失败判定：0 次 LLM 调用（离线降级）、评委解析失败、Agent 全失败的 case **不计入平均分**，单独列入「失败与降级明细」——宁可少一个样本，不要一个被污染的结论。  
+操作细节见 `eval/消融对照说明.md`。
+
+**2026-09-13 初测（T001 东京，1 case）**：multi 80 分 / 378s / ~$0.022，single 80 分 / 215s / ~$0.010——本用例质量打平，single 更快更省；sequential 与关反思两组因 API 配额 429 产生降级输出，在旧版报告中被误计为 0 分成功，**新版评测器已自动隔离此类 run**。配额恢复后 `.\scripts\run_ablation.ps1 -Cases 3` 复测。  
+演示与简历见 `docs/`。
+
+### 演示与简历
+
+- `docs/演示脚本.md` — 90 秒口述 + 操作节奏  
+- `docs/简历项目段.md` — 短版/详细版/英文一行（数字跑完再填）
+
+### 测试
+
+```bash
+pytest -q
+pytest -m slow   # 含 LLM
+```
+
+---
+
+## 核心实现（可深挖点）
+
+### 1. 骨架优先（用户端体感）
+点生成后先用本地知识库 + 路线优化 + LP 预算拼出可读骨架（不调 LLM），SSE 事件 `skeleton` 推给前端立刻展示；Agent 在后台填美食/安全/细节，`final` 整体替换。解决「等几分钟白屏」。
+
+### 2. 执行模式与消融
+`build_travel_crew(..., mode=..., enable_reflection=...)`  
+`app/agents.split_layers()` 按模式切层。评测侧 `eval/eval_runner.py --ablation` 真正调用多组配置。
+
+### 3. 工具成本预算
+`web_search` 有全局次数上限（`MAX_WEB_SEARCH_CALLS`），超限自动降级到本地 `search_knowledge`。  
+意图：贵工具不是想调就调，面试可讲「成本感知路由」。
+
+### 4. Okapi BM25 + FAISS 混合
+查询侧用 k1/b 饱和公式，不是建索引时写死分。融合权重语义 0.7 / 关键词 0.3。
+
+### 5. GPS 知识图谱
+`ATTRACTION_COORDS` 真实经纬度 → Haversine → 半径 2.5km 内按距离排序，输出 `nearby` + `nearby_km`。  
+同类型关系保留。
+
+### 6. 路线优化
+贪心最近邻 + 2-opt；测试保证 2-opt 路径不差于贪心。
+
+### 7. LP 预算
+PuLP 在总预算与分项上下限下分配；不可用时回退比例分配。
+
+### 8. 稳定性
+- 工具失败：重试 → fallback 工具链 → 降级文案  
+- LLM 全挂：本地离线攻略（知识库 + 路线 + 预算）  
+- SSE：事件持久化 + `GET /api/plan/{id}/events?after_id=` 回放  
+- 限流：令牌桶 10 RPS + 并发 5 + 指数退避抖动
+
+---
+
+## API
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `POST /api/plan/stream` | POST | SSE：thought/action/observation/token/agent_done |
+| `POST /api/plan/followup` | POST | 多轮追改 |
+| `POST /api/plan/{id}/feedback` | POST | 1–5 星反馈（会注入后续 prompt） |
+| `GET /api/plan/{id}/events` | GET | 断线重连回放 |
+| `GET /api/history` | GET | 历史分页 |
+| `GET /api/health` | GET | 健康检查 |
+
+---
+
+## 项目结构
+
+```
+app/
+  agents.py           # Agent 定义 / 反思 prompt / 模式切层
+  crew.py             # FC 引擎 + 模式执行 + 工具恢复 + 预算
+  concurrency.py      # 令牌桶 + 退避
+  evaluation.py       # 多评委模块
+  memory.py           # 偏好 + 向量记忆
+  tools/
+    knowledge_search.py  # FAISS + Okapi BM25 + GPS 图谱
+    route_optimizer.py   # Haversine + 贪心 + 2-opt
+    budget_optimizer.py  # PuLP LP
+eval/
+  eval_runner.py      # 消融评测 CLI
+tests/
+  test_pipeline_and_retrieval.py  # 模式/BM25/GPS/预算行为测试
+```
+
+---
+
+## 面试 Q&A（按本仓库真实实现）
+
+**Q: 多 Agent 比单 Agent 好在哪？**  
+A: 跑 `--ablation`。看 multi vs single 的中位分、关键词覆盖、耗时。我的立场是：多 Agent 提升板块覆盖与结构，但延迟和 token 上升；若业务只要「能看的行程」，single 可能够用。这是产品取舍不是信仰。
+
+**Q: 为什么不全并行？**  
+A: Planner 依赖 Researcher 的调研结果；Budget/Foodie/Safety 互不依赖且共享前两层上下文。`sequential` 模式就是用来量「并行省了多少墙钟时间、有没有掉质量」。
+
+**Q: 知识图谱是真图吗？**  
+A: 是地理邻近图 + 类型边，不是通用 KG。邻近用 GPS≤2.5km 计算并返回公里数；类型边来自知识库 `type` 字段。不假装是 Wikidata。
+
+**Q: BM25 为什么自己写？**  
+A: 依赖轻、中文按字 + 英文按词可解释。查询期用 Okapi 公式；和 FAISS 语义分归一化后 0.7/0.3 融合。可以做消融：hybrid on/off。
+
+**Q: 反思为什么可关？**  
+A: 每次反思最多多 2 次 LLM 调用。线上默认开，评测/演示用 `ENABLE_REFLECTION=false` 换延迟。
+
+**Q: 工具失败怎么办？**  
+A: 原工具重试 1 次 → `_TOOL_FALLBACKS` 链（如 knowledge→web）→ 告知模型「暂无数据」。全 Agent 失败走本地离线方案。
+
+**Q: 断线怎么办？**  
+A: thought/action/observation/final 落 SQLite；`after_id` 游标回放。token 事件不落库（量太大）。
+
+**Q: 延迟多少？**  
+A: 完整 multi+反思约 3–6 分钟（5 个 LLM 角色 × 多轮工具）。这是当前设计上限；优化方向是裁 Agent、关反思、并行层内流式、或改成「先骨架后填充」。
+
+---
+
+## 已知诚实边界
+
+- 知识库为 28 城静态 JSON + 少量 Markdown，不是实时 OTA 数据。  
+- 评委是 LLM-as-judge，有偏差；正式对比应加人工抽检。  
+- Token/成本为字符粗估，不是计费账单。  
+- 消融主结论目前基于 1 case（配额受限），n≥3 复测前只能表述为「方向性发现」。  
+- 单机 SQLite，无鉴权多租户；定位是可深挖的 Agent 工程作品，不是 SaaS。
+
+---
+
+## 简历一句话（示例）
+
+> 手写 Function Calling 多 Agent 旅行规划系统（FastAPI）：3 层串并行 + 动态路由 + 工具失败降级；Okapi BM25+FAISS 混合检索与 GPS 路线/LP 预算；内置 single/sequential/multi 消融评测，可量化多 Agent 相对单 Agent 的质量–延迟权衡；SSE 断线回放与令牌桶限流保障演示稳定。
