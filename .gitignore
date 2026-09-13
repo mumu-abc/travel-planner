@@ -44,3 +44,6 @@ eval/report*.md
 *.log
 .DS_Store
 Thumbs.db
+
+# 旧版评测器产出的历史报告（含已修复的 0 分误计数据，仅本地留档）
+eval/archive/report*.md
