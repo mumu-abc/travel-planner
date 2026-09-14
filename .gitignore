@@ -32,9 +32,12 @@ data/
 .coverage
 htmlcov/
 
-# 评测产物（保留 eval/eval_runner.py 与说明，只忽略报告）
+# 评测产物（保留 eval/eval_runner.py 与说明；一次性跑分报告忽略）
 eval/report*.md
+# 例外：可复现的基准证据报告（面试官要能直接看到数字）
 !eval/report_latency.md
+!eval/report_tools.md
+!eval/report_memory.md
 !eval/消融对照说明.md
 
 # 个人求职准备材料（不入公共仓库，如需分享可手动移除本行）
