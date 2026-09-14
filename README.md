@@ -144,16 +144,21 @@ python -m eval.memory_bench --top-k 3                # 记忆检索 Recall@1/3�
 
 ### 评测 / 消融（面试前必跑）
 
+> **跑之前先查配额**（1 秒出结果，不消耗有意义额度）：
+> ```bash
+> python -m eval.eval_runner --check-quota
+> ```
+> 配额没恢复时会直接退出（退出码 2），**不会产出无效报告**——因为 429 时 pipeline 会静默走离线降级，跑满一小时得到的全是 0 次 LLM 调用的样本，旧报告里「0 分却标 ok」就是这么来的。
+
 ```bash
-# 单配置 3 case
-python -m eval.eval_runner --cases 3 --output eval/report.md
+# 快速验证（1 case × 4 变体，约 20 分钟）
+python -m eval.eval_runner --cases 1 --ablation --output eval/report_ablation.md
 
-# 关反思（更快）
-python -m eval.eval_runner --cases 3 --no-reflection --output eval/report_fast.md
-
-# 消融：multi vs single vs sequential vs multi-no-refl
+# 正式：3 case × 4 变体（multi / single / sequential / multi-无反思）
 python -m eval.eval_runner --cases 3 --ablation --output eval/report_ablation.md
 ```
+
+每个变体跑完都会写入 `*.partial.md`，**中途中断不丢已完成样本**。Windows 可直接用 `.\scripts\run_ablation.ps1 -Cases 3`（会自动挑一个装了依赖的 Python，并先做配额自检）。
 
 报告含平均分、关键词覆盖、耗时、**~Token / ~成本（字符粗估，仅横向对比）**。  
 评测器内置失败判定：0 次 LLM 调用（离线降级）、评委解析失败、Agent 全失败的 case **不计入平均分**，单独列入「失败与降级明细」——宁可少一个样本，不要一个被污染的结论。  
