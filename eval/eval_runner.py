@@ -306,16 +306,53 @@ def _agg(rows: list[dict]) -> dict:
     }
 
 
+def preflight_check(client: OpenAI) -> None:
+    """
+    正式评测前用一次极小调用确认 LLM 真的可用。
+
+    为什么必须有这一步：
+        配额耗尽（429）时 pipeline 不会报错，而是静默走本地离线降级，
+        产出 0 次 LLM 调用的「计划」。跑满一小时得到的全是无效样本——
+        旧版报告里那些「0 分却标记 ok」的行就是这么来的。
+        宁可一秒失败，不要一小时垃圾。
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": "回复 OK 两个字母"}],
+            max_tokens=8,
+            temperature=0,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        print(f"✅ 配额自检通过（模型响应：{text[:20]!r}）")
+    except Exception as e:
+        print("\n" + "=" * 62)
+        print("❌ 配额自检失败，已终止评测（不会产出无效报告）")
+        print(f"   模型：{settings.llm_model}")
+        print(f"   错误：{str(e)[:300]}")
+        print("-" * 62)
+        print("   现在继续跑，每个 case 都会静默走离线降级（0 次 LLM 调用），")
+        print("   跑满一小时得到的全是无效样本——旧报告里「0 分却标 ok」")
+        print("   就是这么来的。等配额恢复后重跑即可。")
+        print("   确需强制运行：加 --skip-preflight")
+        print("=" * 62)
+        raise SystemExit(2)
+
+
 def run_eval(
     num_cases: int = 15,
     mode: str = "multi",
     enable_reflection: bool = True,
     ablation: bool = False,
+    skip_preflight: bool = False,
+    partial_path: str = "",
 ) -> str:
     """
     ablation=True 时跑 multi / single / sequential 三组，输出对比表。
     """
     client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    if not skip_preflight:
+        preflight_check(client)
     cases = EVAL_CASES[:num_cases]
 
     if ablation:
@@ -338,6 +375,14 @@ def run_eval(
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}]", end=" ")
             all_rows.append(run_one(client, case, m, refl))
+
+        # 每个变体跑完就落盘：中途中断也不丢已完成的样本
+        if partial_path:
+            Path(partial_path).write_text(
+                _generate_report(all_rows, settings.llm_model, ablation=ablation),
+                encoding="utf-8",
+            )
+            print(f"   ↳ 中间结果已写入 {partial_path}")
 
     return _generate_report(all_rows, settings.llm_model, ablation=ablation)
 
@@ -450,13 +495,35 @@ def main():
     parser.add_argument("--mode", type=str, default="multi", choices=["multi", "sequential", "single"])
     parser.add_argument("--no-reflection", action="store_true", help="关闭自我反思")
     parser.add_argument("--ablation", action="store_true", help="multi/single/sequential/no-refl 对比")
+    parser.add_argument("--skip-preflight", action="store_true", help="跳过跑前配额自检（不推荐）")
+    parser.add_argument("--partial", type=str, default="", help="每个变体跑完后写入的中间报告路径")
+    parser.add_argument("--check-quota", action="store_true", help="只做一次配额自检然后退出，不跑评测")
     args = parser.parse_args()
+
+    if args.check_quota:
+        preflight_check(OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url))
+        print("\n配额已恢复，可以跑消融了：")
+        print("  .\\scripts\\run_ablation.ps1 -Cases 3")
+        return
+
+    variants = 4 if args.ablation else 1
+    runs = args.cases * variants
+    if runs > 1:
+        print(
+            f"预计 {runs} 次完整生成（{args.cases} case × {variants} 变体），"
+            f"按历史耗时约 {runs * 4}–{runs * 7} 分钟。"
+        )
+        print("中途中断不会丢失：每个变体跑完都会写入中间报告。\n")
+    if not args.partial:
+        args.partial = str(Path(args.output).with_suffix("")) + ".partial.md"
 
     report = run_eval(
         num_cases=args.cases,
         mode=args.mode,
         enable_reflection=not args.no_reflection,
         ablation=args.ablation,
+        skip_preflight=args.skip_preflight,
+        partial_path=args.partial,
     )
 
     output_path = Path(args.output)
