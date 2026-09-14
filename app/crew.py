@@ -74,6 +74,16 @@ from app.agents import (
 logger = logging.getLogger(__name__)
 
 from app.usage import get_usage
+from app.tool_metrics import (
+    OK,
+    OK_RETRY,
+    OK_FALLBACK,
+    FAILED,
+    # 用别名：本模块已有一个同名的 AgentTrace.tool_calls 记录类型，避免覆盖
+    ToolCallRecord as ToolMetricRecord,
+    get_tool_metrics,
+)
+from app.tool_cache import cache_key, get_tool_cache
 
 
 def _note_llm_io(messages: list, output_text: str) -> None:
@@ -286,13 +296,39 @@ TOOLS = [
 
 def _execute_tool(name: str, arguments: dict) -> dict:
     """
-    执行工具调用，返回结构化结果。
+    执行工具调用（带 TTL 缓存与指标埋点），返回结构化结果。
 
     Returns:
         {"success": True, "text": "格式化文本"} 或
         {"success": False, "text": "错误信息"}
+
+    命中缓存时额外带 "_cached": True，供上层区分「真实执行」与「复用结果」——
+    复用的调用不计入原始成功率，否则缓存会掩盖工具的真实稳定性。
     """
     get_usage().add_tool(name)
+    cache = get_tool_cache()
+    key = cache_key(name, arguments)
+
+    if cache.enabled:
+        hit = cache.get(key)
+        if hit is not None:
+            result = dict(hit)
+            result["_cached"] = True
+            return result
+
+    started = time.perf_counter()
+    result = _execute_tool_uncached(name, arguments)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    get_tool_metrics().record_raw(name, bool(result.get("success")), elapsed_ms)
+
+    if result.get("success") and cache.enabled:
+        # 只缓存成功结果：缓存失败会把一次瞬时故障固化成持久故障
+        cache.set(key, {k: v for k, v in result.items() if not k.startswith("_")})
+    return result
+
+
+def _execute_tool_uncached(name: str, arguments: dict) -> dict:
+    """真正执行工具本体（不含缓存与埋点），便于单测隔离。"""
     try:
         if name == "get_weather":
             data = get_weather(arguments["destination"])
@@ -446,6 +482,35 @@ def _adapt_args(orig_tool: str, fallback_tool: str, args: dict) -> dict:
     return args
 
 
+def _record_tool_outcome(
+    tool: str,
+    status: str,
+    started: float,
+    retries: int = 0,
+    fallback_to: str = "",
+    cached: bool = False,
+    error: str = "",
+) -> None:
+    """把一次逻辑调用（工具 + 重试 + 降级）的最终结果写入指标。
+
+    埋点属于旁路观测，任何异常都不能影响生成主流程，故整体兜底。
+    """
+    try:
+        get_tool_metrics().record(
+            ToolMetricRecord(
+                tool=tool,
+                status=status,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+                retries=retries,
+                fallback_to=fallback_to,
+                cached=cached,
+                error=error,
+            )
+        )
+    except Exception:
+        logger.debug("工具指标记录失败（不影响主流程）", exc_info=True)
+
+
 @traceable(run_name="tool_execution")
 def _execute_tool_with_recovery(
     name: str,
@@ -462,9 +527,12 @@ def _execute_tool_with_recovery(
       3. 仍失败则尝试 fallback 工具
       4. 全部失败则返回降级提示
     """
+    started = time.perf_counter()
     result = _execute_tool(name, _normalize_tool_args(name, arguments, destination))
+    cached = bool(result.get("_cached"))
 
     if result["success"]:
+        _record_tool_outcome(name, OK, started, cached=cached)
         return result["text"]
 
     # ── 重试一次 ──
@@ -472,19 +540,38 @@ def _execute_tool_with_recovery(
         logger.warning(f"  ⚠️ [{agent_name}] 工具 {name} 首次失败，重试中...")
         trace.retries += 1
         result = _execute_tool(name, _normalize_tool_args(name, arguments, destination))
+        cached = bool(result.get("_cached"))
         if result["success"]:
+            _record_tool_outcome(name, OK_RETRY, started, retries=1, cached=cached)
             return result["text"]
 
     # ── 尝试 fallback ──
+    attempts = 2 if max_retries > 0 else 1
     for fallback in _TOOL_FALLBACKS.get(name, []):
         logger.warning(f"  🔄 [{agent_name}] {name} 失败，降级到 {fallback}")
         trace.retries += 1
         adapted_args = _adapt_args(name, fallback, arguments)
         fallback_result = _execute_tool(fallback, adapted_args)
+        attempts += 1
         if fallback_result["success"]:
+            _record_tool_outcome(
+                name,
+                OK_FALLBACK,
+                started,
+                retries=attempts - 1,
+                fallback_to=fallback,
+                cached=bool(fallback_result.get("_cached")),
+            )
             return f"[降级自 {name} → {fallback}] {fallback_result['text']}"
 
     # ── 全部失败：返回降级提示 ──
+    _record_tool_outcome(
+        name,
+        FAILED,
+        started,
+        retries=max(0, attempts - 1),
+        error=str(result.get("text", ""))[:200],
+    )
     return (
         f"⚠️ 工具 {name} 及其降级方案均执行失败。"
         f"请基于已有信息继续生成，缺失的部分标注'暂无数据'。"
