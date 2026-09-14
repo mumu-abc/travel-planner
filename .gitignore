@@ -18,6 +18,8 @@ env/
 # Environment / secrets
 .env
 .env.local
+# 换 key 时自动生成的备份，含真实密钥
+.env.backup*
 *.pem
 
 # Data
