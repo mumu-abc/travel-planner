@@ -40,6 +40,8 @@ eval/report*.md
 !eval/report_latency.md
 !eval/report_tools.md
 !eval/report_memory.md
+!eval/report_ablation.md
+!eval/report_norefl.md
 !eval/消融对照说明.md
 
 # 个人求职准备材料（不入公共仓库，如需分享可手动移除本行）
