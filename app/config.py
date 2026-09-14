@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # 工具成本预算：限制 web_search 等昂贵工具次数（0=不限制）
     max_web_search_calls: int = 2
 
+    # ── 可观测性与缓存 ────────────────────────────────────
+    # 工具层 TTL 缓存：同一目的地重复规划时复用静态检索/确定性计算结果。
+    # 实时工具（天气/汇率）TTL 仅 30/60 分钟，不会拿旧数据糊弄用户。
+    enable_tool_cache: bool = True
+    tool_cache_max_size: int = 512
+
     # ── 服务器配置 ────────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8000

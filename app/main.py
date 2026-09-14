@@ -15,7 +15,8 @@ from fastapi.responses import HTMLResponse
 from app.config import settings
 from app.database import db
 from app.models import HealthResponse
-from app.routers import history, plan
+from app.tool_cache import configure
+from app.routers import history, metrics, plan
 
 # ── 日志配置 ──────────────────────────────────────────────
 logging.basicConfig(
@@ -35,6 +36,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"   pipeline_mode: {settings.pipeline_mode}, reflection: {settings.enable_reflection}")
     logger.info(f"   数据库: {settings.travel_db_path}")
     logger.info(f"   端口: {settings.port}")
+    _cache = configure(
+        enabled=settings.enable_tool_cache,
+        max_size=settings.tool_cache_max_size,
+    )
+    logger.info(f"   工具缓存: {'开启' if _cache.enabled else '关闭'} (容量 {_cache.max_size})")
     yield
     db.close()
     logger.info("👋 旅行规划助手已关闭")
@@ -51,6 +57,7 @@ app = FastAPI(
 # ── 注册路由 ──────────────────────────────────────────────
 app.include_router(plan.router)
 app.include_router(history.router)
+app.include_router(metrics.router)
 
 
 # ── 首页 ──────────────────────────────────────────────────
