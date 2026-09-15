@@ -1278,14 +1278,20 @@ def _generate_fallback_plan(
     parts = [f"# 🗺️ {destination} {days}日旅行攻略（离线版）\n\n> ⚠️ AI 服务暂时不可用，以下为基础信息，仅供参考。\n"]
 
     # 1. 知识库检索
+    # 必须显式传 destination：否则库外目的地会命中语义相近的其它城市内容，
+    # 输出看着像答案、实际与查询无关（详见 docs/缺陷记录_检索静默失败.md）
     try:
         results = search_knowledge(
-            query=destination, top_k=10
+            query=destination, destination=destination, top_k=10
         )
         if results:
             parts.append("## 📍 目的地信息\n")
             for i, r in enumerate(results[:5], 1):
                 parts.append(f"{i}. {r.get('text', '')[:200]}\n")
+        else:
+            parts.append(
+                f"## 📍 目的地信息\n（知识库暂未覆盖「{destination}」，无可用基础信息）\n"
+            )
     except Exception:
         parts.append("## 📍 目的地信息\n（知识库暂无数据）\n")
 
