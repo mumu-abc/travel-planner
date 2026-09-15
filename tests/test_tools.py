@@ -107,7 +107,7 @@ class TestKnowledgeSearch:
 
 
 class TestWebSearch:
-    """Web 搜索工具测试（DuckDuckGo + Wikipedia API）"""
+    """Web 搜索工具测试（必应中国 → DuckDuckGo → Wikipedia）"""
 
     def test_search_returns_list(self):
         """搜索应返回列表"""
@@ -126,7 +126,7 @@ class TestWebSearch:
             assert "title" in r
             assert "snippet" in r
             assert "source" in r
-            assert r["source"] in ("DuckDuckGo", "Wikipedia")
+            assert r["source"] in ("Bing", "DuckDuckGo", "Wikipedia")
 
     def test_format_web_search(self):
         """格式化搜索结果"""

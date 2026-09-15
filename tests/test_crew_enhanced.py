@@ -85,6 +85,32 @@ class TestToolRecovery:
             assert "web_search" in result
             assert trace.retries >= 1
 
+    def test_skip_fallback_when_web_search_unavailable(self):
+        """web_search 后端全凉时不应再降级到它——白等一轮超时救不了请求"""
+        from app.crew import _execute_tool_with_recovery, AgentTrace
+        from app.tools import web_search as ws
+
+        trace = AgentTrace(name="test", label="测试")
+        ws.reset_backend_state()
+        try:
+            for name in ws.BACKEND_ORDER:
+                ws._mark_backend_failure(name)
+                ws._mark_backend_failure(name)
+
+            calls = []
+
+            def mock_execute(name, args):
+                calls.append(name)
+                return {"success": False, "text": "失败"}
+
+            with patch("app.crew._execute_tool", side_effect=mock_execute):
+                _execute_tool_with_recovery(
+                    "get_weather", {"destination": "东京"}, "researcher", trace
+                )
+            assert "web_search" not in calls, "不应降级到不可用的 web_search"
+        finally:
+            ws.reset_backend_state()
+
     def test_retry_then_success(self):
         from app.crew import _execute_tool_with_recovery
         from app.crew import AgentTrace
@@ -280,18 +306,55 @@ class TestWebSearchMocked:
             assert results == []
 
     def test_web_search_combined(self):
-        from app.tools.web_search import web_search
+        from app.tools.web_search import web_search, reset_backend_state
 
-        with patch("app.tools.web_search._ddg_search", return_value=[
-            {"title": "DDG Result", "snippet": "test", "url": "", "source": "DuckDuckGo"}
-        ]), patch("app.tools.web_search._wiki_search", return_value=[
-            {"title": "Wiki Result", "snippet": "test", "url": "", "source": "Wikipedia"}
-        ]):
+        # 必应排在最前，这里让它返回空，验证会继续往后走海外源
+        reset_backend_state()
+        with patch("app.tools.web_search._bing_search", return_value=[]), \
+             patch("app.tools.web_search._ddg_search", return_value=[
+                 {"title": "DDG Result", "snippet": "test", "url": "", "source": "DuckDuckGo"}
+             ]), patch("app.tools.web_search._wiki_search", return_value=[
+                 {"title": "Wiki Result", "snippet": "test", "url": "", "source": "Wikipedia"}
+             ]):
             results = web_search("test query", max_results=5)
             assert len(results) == 2
             sources = [r["source"] for r in results]
             assert "DuckDuckGo" in sources
             assert "Wikipedia" in sources
+        reset_backend_state()
+
+    def test_bing_is_first_backend(self):
+        """必应必须是首选后端：国内唯一可达源"""
+        from app.tools import web_search as ws
+
+        assert ws.BACKEND_ORDER[0] == "bing"
+
+    def test_web_search_short_circuits_when_all_backends_down(self):
+        """全部后端冷却时应立刻返回，不再等满超时（快失败）"""
+        import time
+
+        from app.tools import web_search as ws
+
+        ws.reset_backend_state()
+        try:
+            for name in ws.BACKEND_ORDER:
+                ws._mark_backend_failure(name)
+                ws._mark_backend_failure(name)
+            assert ws.web_search_available() is False
+
+            started = time.perf_counter()
+            results = ws.web_search("东京 景点", max_results=3)
+            elapsed = time.perf_counter() - started
+            assert results == []
+            assert elapsed < 1.0, f"快失败失效：耗时 {elapsed:.1f}s"
+        finally:
+            ws.reset_backend_state()
+
+    def test_web_search_empty_query(self):
+        from app.tools.web_search import web_search
+
+        assert web_search("", max_results=3) == []
+        assert web_search("   ", max_results=3) == []
 
 
 # ── 价格解析测试 ────────────────────────────────────────────

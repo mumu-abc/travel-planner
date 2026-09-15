@@ -65,7 +65,8 @@ from app.tools.knowledge_search import (
 )
 from app.tools.route_optimizer import optimize_route_from_knowledge, format_optimized_route
 from app.tools.budget_optimizer import optimize_budget, format_budget_plans
-from app.tools.web_search import web_search, format_web_search
+from app.tools.web_search import (web_search, format_web_search,
+                                  web_search_available)
 from app.agents import (
     AGENTS,
     AGENT_MAP as _AGENT_MAP,
@@ -360,10 +361,16 @@ def _execute_tool_uncached(name: str, arguments: dict) -> dict:
                 if dest and not is_destination_covered(dest):
                     # 区分「库里没有这个城市」和「城市有但没查到」——
                     # 前者应换城市或走 web_search，后者只是这次没命中
+                    # 注意：不能直接写"改用 web_search"，联网也可能不可用
+                    # （国内实测海外引擎全超时，见 docs/缺陷记录_web搜索国内不可用.md）
+                    hint = ("可尝试 web_search 联网查询"
+                            if web_search_available()
+                            else "联网搜索当前不可用")
                     return {
                         "success": False,
-                        "text": f"知识库未覆盖「{dest}」，本地无可用资料。"
-                                f"建议改用 web_search 联网查询，或提示用户换一个城市。",
+                        "text": f"知识库未覆盖「{dest}」，本地无可用资料。{hint}；"
+                                f"两者都无结果时，请直接告知用户「暂不支持该目的地」，"
+                                f"不要用其它城市的内容代替。",
                     }
                 return {"success": False, "text": "知识库未找到相关信息"}
             return {"success": True, "text": format_search_results(results)}
@@ -402,6 +409,14 @@ def _execute_tool_uncached(name: str, arguments: dict) -> dict:
                 max_results=arguments.get("max_results", 5),
             )
             if not results:
+                if not web_search_available():
+                    # 区分「搜了但没结果」和「根本连不上」：
+                    # 前者可以换个词再试，后者再试也是白等
+                    return {
+                        "success": False,
+                        "text": "联网搜索当前不可用（所有搜索后端均无响应），"
+                                "请依赖本地知识库，或如实告知用户资料不足。",
+                    }
                 return {"success": False, "text": "网络搜索未找到相关信息"}
             return {"success": True, "text": format_web_search(results)}
 
@@ -567,6 +582,11 @@ def _execute_tool_with_recovery(
     # ── 尝试 fallback ──
     attempts = 2 if max_retries > 0 else 1
     for fallback in _TOOL_FALLBACKS.get(name, []):
+        # 明知道会失败的兜底就不要去试：它既救不了请求，又白等一轮超时。
+        # 后端健康状态由 web_search 模块维护（连续失败后进入冷却期）。
+        if fallback == "web_search" and not web_search_available():
+            logger.warning(f"  ⏭️ [{agent_name}] 跳过降级到 web_search（后端全部不可用）")
+            continue
         logger.warning(f"  🔄 [{agent_name}] {name} 失败，降级到 {fallback}")
         trace.retries += 1
         adapted_args = _adapt_args(name, fallback, arguments)
