@@ -784,13 +784,14 @@ def _looks_like_tool_dump(text: str) -> bool:
     if not text:
         return True
     t = text.strip()
+    low = t[:200].lower()
     if t.startswith("<tool_call>") or t.startswith("{\n  \"name\"") or t.startswith("{\"name\""):
         return True
-    # 全文几乎只有工具调用块
-    if "<tool_call>" in t and len(t) < 800 and t.count("<tool_call>") >= 1:
-        # 允许正文里举例，但若开头就是工具调用则拒绝
-        if t.lstrip().startswith("<tool_call>"):
-            return True
+    if t.startswith("function=") or t.startswith("<function"):
+        return True
+    # 开头就是 JSON 工具负载
+    if low.lstrip().startswith('{"name"') or low.lstrip().startswith('{"arguments"'):
+        return True
     return False
 
 
@@ -859,13 +860,17 @@ def _run_agent_with_tools(
         # 工具轮次耗尽，强制生成最终输出
         output = _stream_final_output(client, agent, messages, limiter, token_callback)
 
-    # ── 拒收「伪最终」：模型吐了工具调用文本/过短内容 ──
-    if _looks_like_tool_dump(output) or len(output.strip()) < 200:
-        logger.warning(f"  ⚠️ [{agent['label']}] 最终输出无效（len={len(output)}），强制重写…")
+    # ── 拒收「伪最终」：工具调用文本 / 过短正文 ──
+    # 完整方案通常 >800 字；<120 基本是截断或伪输出
+    if _looks_like_tool_dump(output) or len((output or "").strip()) < 120:
+        logger.warning(
+            f"  ⚠️ [{agent['label']}] 最终输出无效（len={len(output or '')}），强制重写…"
+        )
         rewrite_msg = (
-            "不要输出任何工具调用、JSON 或 XML。"
-            "请根据已有工具结果，直接输出完整、可读的最终 Markdown 正文。"
-            "若某类信息缺失，写「暂无数据」并继续其他章节。"
+            "不要输出任何工具调用、JSON 或 XML 标签。\n"
+            "请只根据已有对话中的工具结果，输出完整、可读的最终 Markdown 正文。\n"
+            "必须包含分节标题；信息缺失处写「暂无数据」，不要中断。\n"
+            "禁止以 <tool_call> 或 { 开头。"
         )
         try:
             resp = rate_limited_call(
@@ -873,20 +878,49 @@ def _run_agent_with_tools(
                 client.chat.completions.create,
                 model=settings.llm_model,
                 messages=messages + [
-                    {"role": "assistant", "content": output[:500] if output else "(空)"},
+                    {
+                        "role": "assistant",
+                        "content": (output or "")[:400] or "(空)",
+                    },
                     {"role": "user", "content": rewrite_msg},
                 ],
                 temperature=settings.llm_temperature,
                 max_tokens=4096,
             )
-            rewritten = resp.choices[0].message.content or ""
+            rewritten = (resp.choices[0].message.content or "").strip()
             _note_llm_io(messages, rewritten)
-            if rewritten.strip() and not _looks_like_tool_dump(rewritten):
+            ok = (
+                rewritten
+                and not _looks_like_tool_dump(rewritten)
+                and len(rewritten) >= 80
+            )
+            if ok:
                 output = rewritten
-            elif not output.strip():
-                output = rewritten or "（生成失败：无有效正文）"
+            else:
+                # 重写仍失败：无 tools 再生成一次，绝不把伪正文当方案
+                logger.warning(f"  ⚠️ [{agent['label']}] 重写仍无效，无工具再生成一次")
+                output = _stream_final_output(
+                    client,
+                    agent,
+                    messages
+                    + [
+                        {
+                            "role": "user",
+                            "content": (
+                                "请输出完整旅行方案 Markdown 正文。"
+                                "禁止工具调用。缺失写「暂无数据」。"
+                            ),
+                        }
+                    ],
+                    limiter,
+                    token_callback=None,  # 外层统一推送，避免脏流先到前端
+                )
+                if _looks_like_tool_dump(output) or len((output or "").strip()) < 80:
+                    output = "（生成失败：未能产出有效正文，请重试或改用 single 模式）"
         except Exception as e:
             logger.warning(f"  强制重写失败: {e}")
+            if _looks_like_tool_dump(output) or len((output or "").strip()) < 80:
+                output = "（生成失败：模型未返回有效正文）"
 
     # ── 自我反思（可关）──
     output = _self_reflect(
