@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # ── Agent 执行策略 ────────────────────────────────────
     # multi | sequential | single
-    # 默认 single：消融实测 multi 质量打平但慢 ~1.8×/贵 ~2.3×（见 eval/report_ablation.md），
+    # 默认 single：消融实测 multi 质量未见显著差异但慢 ~1.6×/贵 ~2.8×（见 eval/report_ablation.md），
     # 按数据选性价比档；multi 保留为「五板块齐全」深度档，前端可切。
     pipeline_mode: str = "single"
     # 自我反思会额外 1-2 次 LLM 调用；演示/评测可关
