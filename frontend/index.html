@@ -364,6 +364,64 @@ body {
   color:var(--ok);
 }
 
+.progress-panel {
+  display:none;
+  padding:14px 16px;
+  margin-bottom:14px;
+  border:1px solid var(--line);
+  border-radius:var(--r);
+  background:var(--card);
+}
+.progress-line {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:9px;
+}
+.progress-stage {
+  font-size:13px;
+  font-weight:500;
+  color:var(--ink-text);
+}
+.progress-timer {
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--haze);
+  font-variant-numeric:tabular-nums;
+}
+.progress-track {
+  height:5px;
+  border-radius:99px;
+  background:#E8EDF0;
+  overflow:hidden;
+  margin-bottom:9px;
+}
+.progress-fill {
+  height:100%;
+  width:0%;
+  border-radius:99px;
+  background:var(--route);
+  transition:width .45s ease;
+}
+.progress-detail {
+  font-size:12px;
+  line-height:1.65;
+  color:var(--haze);
+  font-family:var(--mono);
+  max-height:42px;
+  overflow:hidden;
+  word-break:break-all;
+}
+.progress-hint {
+  margin-top:8px;
+  font-size:12px;
+  color:var(--haze-2);
+}
+.progress-panel.stalled .progress-hint {
+  color:var(--sun);
+}
+
 .stream-area {
   display:none;
   max-height:200px;
@@ -989,6 +1047,19 @@ body {
     </div>
 
     <div class="status" id="statusBar"></div>
+
+    <div class="progress-panel" id="progressPanel">
+      <div class="progress-line">
+        <span class="progress-stage" id="progressStage">准备中…</span>
+        <span class="progress-timer" id="progressTimer">0s</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-detail" id="progressDetail"></div>
+      <div class="progress-hint" id="progressHint">
+        方案生成约需 1~3 分钟，请勿关闭页面
+      </div>
+    </div>
+
     <div class="stream-area" id="streamArea"></div>
 
     <div class="empty-state" id="emptyState">
@@ -1090,6 +1161,105 @@ let currentPlanId = '';
 
 function setDest(d) { document.getElementById('destination').value = d; }
 
+// ── 进度面板 ────────────────────────────────────────────────
+// 为什么需要它：生成一份方案要 1~5 分钟，中间绝大部分时间只显示一行
+// 「正在启动 AI Agent…」，用户不知道是卡死了还是在正常跑（实测有人等到
+// 十几分钟以为挂了）。这里把它变成「当前在干什么 + 已经等了多久」。
+const PROGRESS = {
+  timer: null,
+  startedAt: 0,
+  lastEventAt: 0,
+  stage: '',
+  stalled: false,
+  get elPanel() { return document.getElementById('progressPanel'); },
+  get elStage() { return document.getElementById('progressStage'); },
+  get elTimer() { return document.getElementById('progressTimer'); },
+  get elFill()  { return document.getElementById('progressFill'); },
+  get elDetail(){ return document.getElementById('progressDetail'); },
+  get elHint()  { return document.getElementById('progressHint'); },
+};
+
+// 工具名 → 人话。用户看不懂 search_attraction_context 是什么，
+// 但看得懂「正在查景点资料」。
+const TOOL_LABELS = {
+  search_knowledge: '检索知识库',
+  search_attraction_context: '查询景点资料',
+  web_search: '联网搜索补充',
+  get_weather: '查询天气',
+  search_hotels: '查询住宿',
+  search_flights: '查询机票',
+  currency_convert: '换算汇率',
+  calculator: '核算预算',
+};
+
+function progressStart() {
+  const p = PROGRESS;
+  p.startedAt = Date.now();
+  p.lastEventAt = p.startedAt;
+  p.stalled = false;
+  p.stage = '准备中…';
+  p.elPanel.style.display = 'block';
+  p.elPanel.classList.remove('stalled');
+  p.elStage.textContent = p.stage;
+  p.elTimer.textContent = '0s';
+  p.elFill.style.width = '0%';
+  p.elDetail.textContent = '';
+  p.elHint.textContent = '方案生成约需 1~3 分钟，请勿关闭页面';
+  if (p.timer) clearInterval(p.timer);
+  // 每秒刷新计时器，顺带做「卡住了」判定（超过 90 秒没有新事件，
+  // 提示语变黄，让用户知道系统还在等模型，不是页面死了）。
+  p.timer = setInterval(() => {
+    const sec = Math.floor((Date.now() - p.startedAt) / 1000);
+    p.elTimer.textContent = sec < 60 ? sec + 's' : Math.floor(sec / 60) + 'm' + (sec % 60) + 's';
+    // 进度条：前 90 秒涨到 85%，之后靠阶段推进，避免一直停在某处显得卡死
+    const auto = Math.min(85, sec * 0.95);
+    if (auto > parseFloat(p.elFill.style.width || '0')) {
+      p.elFill.style.width = auto.toFixed(1) + '%';
+    }
+    const idle = Date.now() - p.lastEventAt;
+    if (idle > 90000 && !p.stalled) {
+      p.stalled = true;
+      p.elPanel.classList.add('stalled');
+      p.elHint.textContent = '当前阶段较慢（模型推理中），仍在正常执行，请继续等待';
+    }
+  }, 1000);
+}
+
+function progressStage(text, pct) {
+  const p = PROGRESS;
+  p.lastEventAt = Date.now();
+  if (p.stalled) { p.stalled = false; p.elPanel.classList.remove('stalled'); }
+  if (text) p.elStage.textContent = text;
+  if (typeof pct === 'number') {
+    const cur = parseFloat(p.elFill.style.width || '0');
+    if (pct > cur) p.elFill.style.width = pct + '%';
+  }
+  p.elHint.textContent = '方案生成约需 1~3 分钟，请勿关闭页面';
+}
+
+function progressDetail(text) {
+  const p = PROGRESS;
+  p.lastEventAt = Date.now();
+  p.elDetail.textContent = text || '';
+  const cur = parseFloat(p.elFill.style.width || '0');
+  // 每次工具动作推进一小格，让进度条有「在动」的观感
+  if (cur < 92) p.elFill.style.width = Math.min(92, cur + 3) + '%';
+}
+
+function progressDone(ok) {
+  const p = PROGRESS;
+  if (p.timer) { clearInterval(p.timer); p.timer = null; }
+  if (ok) {
+    p.elStage.textContent = '生成完成';
+    p.elFill.style.width = '100%';
+  } else {
+    p.elStage.textContent = '已中断';
+  }
+  p.elHint.textContent = '';
+  // 成功时让面板自然淡出，别一直占着地方
+  setTimeout(() => { p.elPanel.style.display = 'none'; }, ok ? 1200 : 0);
+}
+
 function setStatus(msg, type = 'info') {
   const el = document.getElementById('statusBar');
   el.style.display = 'flex';
@@ -1143,6 +1313,7 @@ async function generate() {
 
   try {
     setStatus(progressive ? '正在生成本地骨架…' : '正在启动 AI Agent…', 'info');
+    progressStart();
     if (mode !== 'single') setAgentState('researcher', 'active');
 
     const resp = await fetch('/api/plan/stream', {
@@ -1169,7 +1340,10 @@ async function generate() {
         if (data === '[DONE]') continue;
         try {
           const ev = JSON.parse(data);
-          if (ev.type === 'status') { setStatus(ev.message); }
+          if (ev.type === 'status') {
+            setStatus(ev.message);
+            if (ev.message) progressStage(ev.message);
+          }
           else if (ev.type === 'skeleton') {
             const card = document.getElementById('resultCard');
             card.style.display = 'block';
@@ -1178,6 +1352,7 @@ async function generate() {
               `${dest} · ${days}天 · $${budget} · 本地骨架 · AI 填充中`;
             document.getElementById('resultContent').innerHTML = formatMarkdown(ev.content);
             setStatus(ev.message || '骨架已生成，AI 正在填充…', 'info');
+            progressStage('骨架已生成，AI 正在填充内容', 25);
           }
           else if (ev.type === 'thought') {
             const sa = document.getElementById('streamArea');
@@ -1187,18 +1362,26 @@ async function generate() {
             }
             sa.textContent += '\n[think] ' + ev.agent + ' · ' + ev.content + '\n';
             sa.scrollTop = sa.scrollHeight;
+            progressStage('模型正在思考与规划', null);
+            progressDetail(ev.content);
           }
           else if (ev.type === 'action') {
             const sa = document.getElementById('streamArea');
             sa.classList.remove('md');
             sa.textContent += '[tool]  ' + ev.agent + ' · ' + ev.content + '\n';
             sa.scrollTop = sa.scrollHeight;
+            // ev.content 形如 "web_search({...})"，取函数名映射成人话
+            const fname = String(ev.content || '').split('(')[0].trim();
+            progressStage('正在' + (TOOL_LABELS[fname] || '调用工具'), null);
+            progressDetail(fname ? '工具：' + fname : '');
           }
           else if (ev.type === 'observation') {
             const sa = document.getElementById('streamArea');
             sa.classList.remove('md');
             sa.textContent += '[obs]   ' + (ev.content || '').substring(0, 120) + '…\n\n';
             sa.scrollTop = sa.scrollHeight;
+            progressStage('已获取资料，正在整理', null);
+            progressDetail((ev.content || '').substring(0, 60));
           }
           else if (ev.type === 'token') {
             const sa = document.getElementById('streamArea');
@@ -1213,6 +1396,8 @@ async function generate() {
               window._tokenBuffer = '';
             }
             sa.scrollTop = sa.scrollHeight;
+            progressStage('正在撰写方案正文', null);
+            progressDetail(null);
           }
           else if (ev.type === 'agent_done') {
             if (ev.agent) {
@@ -1224,6 +1409,7 @@ async function generate() {
             document.getElementById('streamArea').style.display = 'none';
             document.getElementById('streamArea').textContent = '';
             setStatus(ev.message);
+            progressStage(ev.message || '当前智能体已完成', null);
           }
           else if (ev.type === 'final') {
             currentResult = ev.content;
@@ -1241,13 +1427,18 @@ async function generate() {
             document.getElementById('feedbackSection').classList.add('show');
             resetFeedback();
             renderRouteMap(dest, days);
+            progressDone(true);
           }
-          else if (ev.type === 'error') { setStatus(ev.message, 'error'); }
+          else if (ev.type === 'error') {
+            setStatus(ev.message, 'error');
+            progressDone(false);
+          }
         } catch (e) {}
       }
     }
   } catch (e) {
     setStatus('网络错误: ' + e.message, 'error');
+    progressDone(false);
   } finally {
     btn.disabled = false; btn.textContent = '生成旅行方案';
   }

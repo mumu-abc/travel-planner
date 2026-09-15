@@ -24,10 +24,21 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     llm_max_retries: int = 3
     llm_timeout: int = 120
-    # 单次生成的最大 token 数。本项目用的 mimo-v2.5-pro 是思维链模型，
-    # 它会先输出一段 reasoning_content 再写正文；4096 会被思维链吃满导致
-    # 正文为空（实测 finish_reason=length / content 长度 0），故给足余量。
-    llm_max_tokens: int = 8192
+    # 单次生成的最大 token 数 —— 这是「安全天花板」，不是目标值。
+    # 本项目用的 mimo-v2.5-pro 是思维链模型，它会先输出一段 reasoning_content
+    # 再写正文；4096 会被思维链吃满导致正文为空（实测 finish_reason=length /
+    # content 长度 0），所以天花板给得很宽松，真正的长度约束交给
+    # max_output_chars（见下），它算出的额度一定小于这个天花板才生效。
+    llm_max_tokens: int = 12288
+    # 调工具阶段用的额度：这一阶段几乎不需要长正文，只要一个函数名 + 参数，
+    # 给 12288 纯属浪费（模型会顺手多写思考）。压到 2048 能显著降低这一轮的延迟。
+    llm_max_tokens_tool: int = 2048
+    # 最终正文的目标字数上限。实测思维链模型会无视 prompt 里的「1800~2800 字」
+    # 写到 6000+ 字，而生成时间与字数近乎线性（163s/6200字 ≈ 时间全花在这），
+    # 所以这里按字数反推一个 token 硬上限，让它在物理层面写不了那么长。
+    # 3200 字 × 2.0 token/字 + 2500 思考预留 = 8900 tokens，低于天花板 12288，
+    # 因此这个上限真正生效（写超会被 finish_reason=length 截断）。0 = 不限制。
+    max_output_chars: int = 3200
 
     # ── 搜索工具 ──────────────────────────────────────────
     search_max_results: int = 5

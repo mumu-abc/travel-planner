@@ -506,8 +506,8 @@ class TestEmptyStreamRetry:
         assert out == "# 正常正文"
 
     def test_llm_max_tokens_used(self):
-        """生成时必须用配置的 token 上限，而不是硬编码 4096。"""
-        from app.crew import _stream_final_output
+        """生成时必须用配置驱动的 token 额度，而不是硬编码 4096。"""
+        from app.crew import _budget_for_chars, _stream_final_output
         from app.config import settings
 
         captured = {}
@@ -526,8 +526,92 @@ class TestEmptyStreamRetry:
             [{"role": "user", "content": "q"}], None,
             token_callback=None,
         )
-        assert captured["max_tokens"] == settings.llm_max_tokens
-        assert settings.llm_max_tokens > 4096
+        assert captured["max_tokens"] == _budget_for_chars(settings.max_output_chars)
+        assert captured["max_tokens"] > 4096
+
+
+class TestOutputLengthCap:
+    """生成时间几乎全由正文长度决定（实测 6200 字 ≈ 163s）。
+
+    prompt 里写「1800~2800 字」模型不听（实测仍写到 6000+），
+    所以必须从 token 额度上物理掐断，否则耗时压不下来。
+    """
+
+    def test_budget_scales_with_chars(self):
+        from app.crew import _budget_for_chars
+
+        small = _budget_for_chars(1000)
+        big = _budget_for_chars(3000)
+        assert small < big, "字数上限越大，token 额度也应越大"
+
+    def test_budget_always_below_ceiling(self):
+        """生效前提：按字数算出的额度必须小于安全天花板，否则等于没设限。"""
+        from app.crew import _budget_for_chars
+        from app.config import settings
+
+        budget = _budget_for_chars(settings.max_output_chars)
+        assert budget < settings.llm_max_tokens, (
+            f"额度 {budget} 未低于天花板 {settings.llm_max_tokens}，字数上限不生效"
+        )
+
+    def test_zero_means_unlimited(self):
+        from app.crew import _budget_for_chars
+        from app.config import settings
+
+        assert _budget_for_chars(0) == settings.llm_max_tokens
+
+    def test_budget_has_room_for_thinking_chain(self):
+        """思维链模型会先想再写；额度只顾正文会让思考吃满、正文为空。"""
+        from app.crew import _THINKING_RESERVE, _budget_for_chars
+
+        chars = 3200
+        budget = _budget_for_chars(chars)
+        body_need = chars * 2.0
+        assert budget - body_need >= _THINKING_RESERVE * 0.9
+
+    def test_stream_uses_capped_budget(self):
+        """端到端：真正发出去的 max_tokens 是被字数裁过的值。"""
+        from app.crew import _budget_for_chars, _stream_final_output
+        from app.config import settings
+
+        captured = {}
+
+        def capture(**kw):
+            captured.update(kw)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "# 正文"
+            return resp
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = capture
+        _stream_final_output(
+            client, {"name": "planner_all", "label": "规划师"},
+            [{"role": "user", "content": "q"}], None, token_callback=None,
+        )
+        expect = _budget_for_chars(settings.max_output_chars)
+        assert captured["max_tokens"] == expect
+        assert captured["max_tokens"] < settings.llm_max_tokens
+
+    def test_truncated_output_is_accepted(self):
+        """被截断的正文仍然是有效正文，不能因为 finish_reason=length 就丢掉。"""
+        from app.crew import _stream_final_output
+
+        def chunk():
+            ch = MagicMock()
+            ch.choices = [MagicMock()]
+            ch.choices[0].delta.content = "# 东京行程\nDay 1 ..."
+            ch.choices[0].finish_reason = "length"
+            return ch
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [iter([chunk()])]
+        out = _stream_final_output(
+            client, {"name": "planner_all", "label": "规划师"},
+            [{"role": "user", "content": "q"}], None,
+            token_callback=lambda a, t: None,
+        )
+        assert "东京行程" in out
 
 
 
