@@ -816,6 +816,8 @@ def _ensure_valid_final_output(
     2) 仍失败 → 无 tools 再生成（不把脏流推给前端）
     3) 再失败 → 明确错误串
     """
+    from app.concurrency import rate_limited_call
+
     if _is_valid_plan_text(output, min_len=120):
         return output or ""
 
