@@ -183,6 +183,454 @@ class TestNormalizeToolArgs:
         assert result["query"] == "东京"
 
 
+# ── 降级链 destination 透传（修复「梅州返回吉隆坡」）─────────
+
+
+class TestFallbackKeepsDestination:
+    """降级到 search_knowledge 时必须带上 destination。
+
+    search_knowledge 靠 destination 做归属过滤，缺了它就退化成
+    「全库找语义最近」，库外目的地（实测梅州）会命中吉隆坡/新加坡。
+    """
+
+    def test_adapt_args_passes_destination(self):
+        from app.crew import _adapt_args
+
+        args = _adapt_args(
+            "optimize_route", "search_knowledge",
+            {"destination": "梅州", "days": 3},
+        )
+        assert args["destination"] == "梅州"
+        assert args["query"] == "梅州"
+
+    def test_adapt_args_keeps_original_query(self):
+        from app.crew import _adapt_args
+
+        args = _adapt_args(
+            "search_knowledge", "search_knowledge",
+            {"query": "梅州 景点", "destination": "梅州"},
+        )
+        assert args["query"] == "梅州 景点"
+        assert args["destination"] == "梅州"
+
+    def test_recovery_injects_destination_when_missing(self):
+        """_adapt_args 没带出来时，recovery 层兜底补上。"""
+        from app.crew import _execute_tool_with_recovery, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        captured = []
+
+        def fake_execute(tool, args):
+            captured.append((tool, dict(args)))
+            if tool == "optimize_route":
+                # 让原工具失败，才会走到降级分支
+                return {"success": False, "text": "路线优化失败: 未找到目的地数据"}
+            return {"success": True, "text": "ok"}
+
+        with patch("app.crew._execute_tool", side_effect=fake_execute):
+            _execute_tool_with_recovery(
+                "optimize_route", {"destination": "梅州", "days": 3},
+                "planner_all", trace, destination="梅州",
+            )
+        last_tool, last_args = captured[-1]
+        assert last_tool == "search_knowledge"
+        # 这一条是回归防线：曾经这里只有 query，没有 destination
+        assert last_args.get("destination") == "梅州"
+
+
+# ── 终局结论不应触发重试/降级（修复重复搜索死循环）──────────
+
+
+class TestTerminalResultNoRetry:
+    """「知识库未覆盖」是确定结论，不是执行故障。
+
+    曾经它被当成 failed，触发重试+降级；库外城市每次必然失败，
+    导致同一工具被反复调用（实测 4 次），8 轮额度烧光。
+    """
+
+    def test_uncovered_destination_marks_terminal(self):
+        from app.crew import _execute_tool
+
+        with patch("app.crew.search_knowledge", return_value=[]), \
+             patch("app.crew.is_destination_covered", return_value=False):
+            result = _execute_tool(
+                "search_knowledge",
+                {"query": "梅州 景点", "destination": "梅州"},
+            )
+        assert result["success"] is False
+        assert result.get("terminal") is True
+        assert "未覆盖" in result["text"]
+
+    def test_terminal_skips_retry_and_fallback(self):
+        from app.crew import _execute_tool_with_recovery, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        calls = []
+
+        def counting_execute(tool, args):
+            calls.append(tool)
+            return {"success": False, "terminal": True, "text": "知识库未覆盖「梅州」"}
+
+        with patch("app.crew._execute_tool", side_effect=counting_execute):
+            out = _execute_tool_with_recovery(
+                "search_knowledge", {"query": "梅州", "destination": "梅州"},
+                "planner_all", trace, destination="梅州",
+            )
+        # 只应执行 1 次：不重试、不降级
+        assert calls == ["search_knowledge"]
+        assert "未覆盖" in out
+        assert trace.retries == 0
+
+    def test_ordinary_failure_still_retries(self):
+        """普通失败（非终局）必须保持原有重试+降级行为，别误伤。"""
+        from app.crew import _execute_tool_with_recovery, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        calls = []
+
+        def counting_execute(tool, args):
+            calls.append(tool)
+            return {"success": False, "text": "工具执行异常: 网络超时"}
+
+        with patch("app.crew._execute_tool", side_effect=counting_execute):
+            _execute_tool_with_recovery(
+                "get_weather", {"destination": "梅州"},
+                "planner_all", trace, destination="梅州",
+            )
+        # 原工具重试一次 + 降级到 web_search，共 3 次
+        assert len(calls) == 3
+        assert calls[0] == "get_weather" and calls[1] == "get_weather"
+
+    def test_terminal_result_is_cached(self):
+        """终局结论可缓存：否则同一未覆盖目的地每次都要白跑一遍检索。"""
+        from app.crew import _execute_tool
+        from app.tool_cache import configure, get_tool_cache
+
+        # 缓存默认关闭（由 main.py 启动时按配置开启），此处显式开启
+        cache = configure(True, max_size=64)
+        cache.clear()
+        calls = []
+
+        def counting(query, **kw):
+            calls.append(query)
+            return []
+
+        try:
+            with patch("app.crew.search_knowledge", side_effect=counting), \
+                 patch("app.crew.is_destination_covered", return_value=False):
+                args = {"query": "梅州 景点", "destination": "梅州"}
+                _execute_tool("search_knowledge", args)
+                _execute_tool("search_knowledge", args)
+            assert len(calls) == 1, "第二次应命中缓存"
+        finally:
+            cache.clear()
+            configure(False)
+
+
+# ── 无解任务提前收束（避免 250s 硬凑长文）───────────────────
+
+
+class TestDataLedger:
+    """数据账本：识别「目的地没资料」的无解任务，提前收束。
+
+    实测背景：梅州不在知识库，模型把 search_knowledge 调了 8 次
+    （6 次拿到同一句「未覆盖」），再用 204 秒硬写 2380 字满是
+    「暂无数据」的长文，总耗时 251 秒。
+    """
+
+    def _ledger(self):
+        from app.crew import _DataLedger
+        return _DataLedger()
+
+    def test_not_hopeless_when_attraction_data_exists(self):
+        """拿到景点数据就不算无解，哪怕其它工具失败。"""
+        led = self._ledger()
+        for _ in range(5):
+            led.record("search_knowledge", "1. 【景点】京都 - 清水寺", ok=False)
+        led.record("search_knowledge", "1. 【景点】京都 - 清水寺", ok=True)
+        assert led.hopeless is False
+
+    def test_not_hopeless_before_enough_calls(self):
+        """只试了 2 次还不能下结论，别过早放弃。"""
+        led = self._ledger()
+        led.record("search_knowledge", "知识库未覆盖", ok=False)
+        led.record("web_search", "网络搜索未找到相关信息", ok=False)
+        assert led.hopeless is False
+
+    def test_hopeless_when_core_missing_and_mostly_empty(self):
+        led = self._ledger()
+        led.record("search_knowledge", "知识库未覆盖「梅州」", ok=False)
+        led.record("search_knowledge", "知识库未覆盖「梅州」", ok=False)
+        led.record("web_search", "网络搜索未找到相关信息", ok=False)
+        led.record("get_weather", "梅州天气实况", ok=True)
+        assert led.hopeless is True
+
+    def test_hopeless_false_when_success_rate_high(self):
+        """空手率不到一半就不算无解（说明只是个别工具失败）。"""
+        led = self._ledger()
+        led.record("search_knowledge", "知识库未覆盖", ok=False)
+        for _ in range(4):
+            led.record("get_weather", "天气实况", ok=True)
+        assert led.hopeless is False
+
+    def test_snapshot_reports_both_buckets(self):
+        led = self._ledger()
+        led.record("get_weather", "天气", ok=True)
+        led.record("search_knowledge", "知识库未覆盖", ok=False)
+        snap = led.snapshot()
+        assert "get_weather" in snap["filled"]
+        assert "search_knowledge" in snap["empty"]
+        assert snap["tool_calls"] == 2
+
+
+class TestEarlyBailOnHopelessTask:
+    """无解任务应当提前收束，不再耗完所有工具轮次。"""
+
+    def test_bail_out_emits_honest_short_answer(self):
+        from app.crew import _run_agent_with_tools, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        rounds = []
+
+        def fake_create(**kw):
+            # 每轮都请求调工具（模拟模型反复换个词再问）
+            rounds.append(kw)
+            tc = MagicMock()
+            tc.function.name = "search_knowledge"
+            tc.function.arguments = '{"query": "梅州 景点", "destination": "梅州"}'
+            tc.id = f"call_{len(rounds)}"
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.tool_calls = [tc]
+            resp.choices[0].message.content = ""
+            return resp
+
+        # 工具每次都空手，模拟「目的地没资料」。
+        # 注意：记账发生在 _execute_tool_with_recovery 内部，
+        # 所以这里要 mock 更下层的 _execute_tool，而不是整个 recovery。
+        with patch("app.crew._execute_tool",
+                   return_value={"success": False,
+                                 "text": "知识库未覆盖「梅州」，本地无可用资料。"}), \
+             patch("app.crew.web_search_available", return_value=False), \
+             patch("app.crew._stream_final_output",
+                   return_value="# 梅州\n暂未收录。") as bail_stream, \
+             patch("app.crew._is_valid_plan_text", return_value=True):
+            client = MagicMock()
+            client.chat.completions.create.side_effect = fake_create
+            out = _run_agent_with_tools(
+                client, {"name": "planner_all", "label": "规划师", "system": "s"},
+                "规划梅州", trace, max_tool_rounds=8,
+                destination="梅州", enable_reflection=False,
+            )
+        assert out == "# 梅州\n暂未收录。"
+        # 关键断言：没有耗完 8 轮，提前收束了
+        assert len(rounds) < 8, f"应在判定无解后收束，实际跑了 {len(rounds)} 轮"
+        assert bail_stream.called
+
+    def test_solvable_task_runs_to_completion(self):
+        """能拿到数据的任务不该被误判成无解。"""
+        from app.crew import _run_agent_with_tools, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        rounds = []
+
+        def fake_create(**kw):
+            rounds.append(kw)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            # 第一轮调工具，第二轮直接给正文
+            if len(rounds) == 1:
+                tc = MagicMock()
+                tc.function.name = "search_knowledge"
+                tc.function.arguments = '{"query": "京都 景点", "destination": "京都"}'
+                tc.id = "call_1"
+                resp.choices[0].message.tool_calls = [tc]
+                resp.choices[0].message.content = ""
+            else:
+                resp.choices[0].message.tool_calls = None
+                resp.choices[0].message.content = "# 京都3日方案\n" + "正文。" * 60
+            return resp
+
+        with patch("app.crew._execute_tool",
+                   return_value={"success": True,
+                                 "text": "1. 【景点】京都 - 清水寺（历史）：门票400日元"}), \
+             patch("app.crew._is_valid_plan_text", return_value=True):
+            client = MagicMock()
+            client.chat.completions.create.side_effect = fake_create
+            out = _run_agent_with_tools(
+                client, {"name": "planner_all", "label": "规划师", "system": "s"},
+                "规划京都", trace, max_tool_rounds=8,
+                destination="京都", enable_reflection=False,
+            )
+        assert "京都" in out
+        # 正常完成：第二轮拿到正文，没有触发提前收束
+        assert len(rounds) == 2
+
+
+# ── 空输出重试（思维链模型吃满 token）───────────────────────
+
+
+class TestEmptyStreamRetry:
+    """思维链模型会把 token 花在 reasoning_content 上，正文可能为空。
+
+    实测：finish_reason=length 且 content 长度 0，导致「最终输出无效（len=0）」。
+    """
+
+    def _fake_stream(self, chunks):
+        for c in chunks:
+            yield c
+
+    def test_empty_stream_falls_back_to_non_stream(self):
+        from app.crew import _stream_final_output
+
+        # 流式：全部空 delta，finish_reason=length
+        def empty_chunk():
+            ch = MagicMock()
+            ch.choices = [MagicMock()]
+            ch.choices[0].delta.content = None
+            ch.choices[0].finish_reason = "length"
+            return ch
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            iter([empty_chunk()]),
+            MagicMock(**{
+                "choices": [MagicMock(message=MagicMock(content="# 正常正文"))]
+            }),
+        ]
+        out = _stream_final_output(
+            client, {"name": "planner_all", "label": "规划师"},
+            [{"role": "user", "content": "q"}], None,
+            token_callback=lambda a, t: None,
+        )
+        assert out == "# 正常正文"
+
+    def test_llm_max_tokens_used(self):
+        """生成时必须用配置的 token 上限，而不是硬编码 4096。"""
+        from app.crew import _stream_final_output
+        from app.config import settings
+
+        captured = {}
+
+        def capture(**kw):
+            captured.update(kw)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "# 正文"
+            return resp
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = capture
+        _stream_final_output(
+            client, {"name": "planner_all", "label": "规划师"},
+            [{"role": "user", "content": "q"}], None,
+            token_callback=None,
+        )
+        assert captured["max_tokens"] == settings.llm_max_tokens
+        assert settings.llm_max_tokens > 4096
+
+
+
+
+
+class TestReflectionCannotBreakOutput:
+    """自我反思是正文校验之后的一道后门。
+
+    它可能把已通过的正文覆盖成 "PASS"（模型把反思 prompt 的
+    "全部满足回复 PASS" 误当成对输出的回答），用户最终只看到 PASS。
+    """
+
+    def _long_plan(self) -> str:
+        return "# 梅州3日方案\n\n## 一、目的地研究\n" + "梅州客家文化介绍。" * 30
+
+    def test_pass_from_fix_is_rejected(self):
+        from app.crew import _self_reflect, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        good = self._long_plan()
+
+        # 第一次调用：反思不通过；第二次：修正却回了 "PASS"
+        reflect = MagicMock()
+        reflect.choices = [MagicMock()]
+        reflect.choices[0].message.content = "缺少预算部分"
+        fix = MagicMock()
+        fix.choices = [MagicMock()]
+        fix.choices[0].message.content = "PASS"
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [reflect, fix]
+
+        out = _self_reflect(
+            client, {"name": "planner_all", "label": "规划师", "system": "s"},
+            [{"role": "user", "content": "q"}], good, trace, None,
+            enabled=True,
+        )
+        assert out == good, "修正返回 PASS 时必须保留原文，不能被覆盖"
+
+    def test_empty_fix_is_rejected(self):
+        from app.crew import _self_reflect, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        good = self._long_plan()
+
+        reflect = MagicMock()
+        reflect.choices = [MagicMock()]
+        reflect.choices[0].message.content = "缺少预算"
+        fix = MagicMock()
+        fix.choices = [MagicMock()]
+        fix.choices[0].message.content = ""
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [reflect, fix]
+
+        out = _self_reflect(
+            client, {"name": "planner_all", "label": "规划师", "system": "s"},
+            [{"role": "user", "content": "q"}], good, trace, None,
+            enabled=True,
+        )
+        assert out == good
+
+    def test_valid_fix_is_adopted(self):
+        """正常修正（返回更完整的正文）仍要生效，别把好功能一起关掉。"""
+        from app.crew import _self_reflect, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        good = self._long_plan()
+        better = good + "\n\n## 二、预算\n" + "预算明细。" * 30
+
+        reflect = MagicMock()
+        reflect.choices = [MagicMock()]
+        reflect.choices[0].message.content = "缺少预算部分"
+        fix = MagicMock()
+        fix.choices = [MagicMock()]
+        fix.choices[0].message.content = better
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [reflect, fix]
+
+        out = _self_reflect(
+            client, {"name": "planner_all", "label": "规划师", "system": "s"},
+            [{"role": "user", "content": "q"}], good, trace, None,
+            enabled=True,
+        )
+        assert out == better
+
+    def test_guard_reverts_when_reflection_returns_junk(self):
+        """最后一道闸：反思把输出改废了就回退到反思前版本。"""
+        from app.crew import _run_agent_with_tools, AgentTrace
+
+        trace = AgentTrace(name="planner_all", label="规划师")
+        good = self._long_plan()
+
+        with patch("app.crew._ensure_valid_final_output", return_value=good), \
+             patch("app.crew._self_reflect", return_value="PASS"), \
+             patch("app.crew._process_tool_calls"):
+            out = _run_agent_with_tools(
+                MagicMock(), {"name": "planner_all", "label": "规划师",
+                              "system": "s"},
+                "规划梅州", trace, destination="梅州",
+                enable_reflection=True,
+            )
+        assert out == good
+
+
 # ── 降级方案测试 ────────────────────────────────────────────
 
 

@@ -32,18 +32,23 @@ OK = "ok"
 OK_RETRY = "ok_retry"
 OK_FALLBACK = "ok_fallback"
 FAILED = "failed"
+# 终局结论：工具给出了确定答案（如"知识库未覆盖该目的地"），
+# 不是执行故障，重试/降级都无法改变结论，故单列一档。
+# 计入可用性（不算失败），但不计入 clean_rate（不算"一次成功"）。
+TERMINAL = "terminal"
 
 # 原始（单次）调用结果
 RAW_OK = "raw_ok"
 RAW_FAIL = "raw_fail"
 
-_FINAL_STATUSES = (OK, OK_RETRY, OK_FALLBACK, FAILED)
+_FINAL_STATUSES = (OK, OK_RETRY, OK_FALLBACK, FAILED, TERMINAL)
 
 _STATUS_LABEL = {
     OK: "一次成功",
     OK_RETRY: "重试后成功",
     OK_FALLBACK: "降级后成功",
     FAILED: "全链路失败",
+    TERMINAL: "终局结论",
 }
 
 
@@ -154,6 +159,7 @@ class ToolMetrics:
                 # 仍要如实反映原始成功率，不能因为没走完整链路就报 0。
                 return {
                     "calls": 0, "ok": 0, "ok_retry": 0, "ok_fallback": 0, "failed": 0,
+                    "terminal": 0,
                     "availability": 0.0, "clean_rate": 0.0, "recovery_rate": 0.0,
                     "retries": 0, "cached": 0,
                     "raw_calls": self._raw_total,
@@ -162,15 +168,18 @@ class ToolMetrics:
                 }
             status = {s: sum(1 for r in self._records if r.status == s) for s in _FINAL_STATUSES}
             ms = sorted(r.elapsed_ms for r in self._records)
+            actual = n - status[TERMINAL]  # 真实执行次数（终局结论是"问过了"，不算执行）
             return {
                 "calls": n,
                 "ok": status[OK],
                 "ok_retry": status[OK_RETRY],
                 "ok_fallback": status[OK_FALLBACK],
                 "failed": status[FAILED],
-                "availability": round((n - status[FAILED]) / n * 100, 1),
-                "clean_rate": round(status[OK] / n * 100, 1),
-                "recovery_rate": round((status[OK_RETRY] + status[OK_FALLBACK]) / n * 100, 1),
+                "terminal": status[TERMINAL],
+                # availability 用真实执行次数做分母：终局结论不是故障，不该拉低可用性
+                "availability": round((actual - status[FAILED]) / actual * 100, 1) if actual else 0.0,
+                "clean_rate": round(status[OK] / actual * 100, 1) if actual else 0.0,
+                "recovery_rate": round((status[OK_RETRY] + status[OK_FALLBACK]) / actual * 100, 1) if actual else 0.0,
                 "retries": sum(r.retries for r in self._records),
                 "cached": sum(1 for r in self._records if r.cached),
                 "raw_calls": self._raw_total,
