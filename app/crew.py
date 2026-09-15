@@ -795,6 +795,86 @@ def _looks_like_tool_dump(text: str) -> bool:
     return False
 
 
+def _is_valid_plan_text(text: str, min_len: int = 120) -> bool:
+    """是否可当作最终方案正文（非伪工具、足够长）。"""
+    t = (text or "").strip()
+    if len(t) < min_len:
+        return False
+    return not _looks_like_tool_dump(t)
+
+
+def _ensure_valid_final_output(
+    client: OpenAI,
+    agent: dict,
+    messages: list,
+    output: str,
+    limiter,
+) -> str:
+    """
+    拒收「伪最终」（原 crew 中段内联逻辑抽出，便于单测与复述）。
+    1) 伪正文/过短 → 有 tools 对话上强制重写
+    2) 仍失败 → 无 tools 再生成（不把脏流推给前端）
+    3) 再失败 → 明确错误串
+    """
+    if _is_valid_plan_text(output, min_len=120):
+        return output or ""
+
+    logger.warning(
+        f"  ⚠️ [{agent['label']}] 最终输出无效（len={len(output or '')}），强制重写…"
+    )
+    rewrite_msg = (
+        "不要输出任何工具调用、JSON 或 XML 标签。\n"
+        "请只根据已有对话中的工具结果，输出完整、可读的最终 Markdown 正文。\n"
+        "必须包含分节标题；信息缺失处写「暂无数据」，不要中断。\n"
+        "禁止以 <tool_call> 或 { 开头。"
+    )
+    try:
+        resp = rate_limited_call(
+            limiter,
+            client.chat.completions.create,
+            model=settings.llm_model,
+            messages=messages + [
+                {
+                    "role": "assistant",
+                    "content": (output or "")[:400] or "(空)",
+                },
+                {"role": "user", "content": rewrite_msg},
+            ],
+            temperature=settings.llm_temperature,
+            max_tokens=4096,
+        )
+        rewritten = (resp.choices[0].message.content or "").strip()
+        _note_llm_io(messages, rewritten)
+        if _is_valid_plan_text(rewritten, min_len=80):
+            return rewritten
+
+        logger.warning(f"  ⚠️ [{agent['label']}] 重写仍无效，无工具再生成一次")
+        output = _stream_final_output(
+            client,
+            agent,
+            messages
+            + [
+                {
+                    "role": "user",
+                    "content": (
+                        "请输出完整旅行方案 Markdown 正文。"
+                        "禁止工具调用。缺失写「暂无数据」。"
+                    ),
+                }
+            ],
+            limiter,
+            token_callback=None,  # 外层统一推送，避免脏流先到前端
+        )
+        if not _is_valid_plan_text(output, min_len=80):
+            return "（生成失败：未能产出有效正文，请重试或改用 single 模式）"
+        return output
+    except Exception as e:
+        logger.warning(f"  强制重写失败: {e}")
+        if not _is_valid_plan_text(output, min_len=80):
+            return "（生成失败：模型未返回有效正文）"
+        return output or ""
+
+
 def _run_agent_with_tools(
     client: OpenAI,
     agent: dict,
@@ -860,67 +940,8 @@ def _run_agent_with_tools(
         # 工具轮次耗尽，强制生成最终输出
         output = _stream_final_output(client, agent, messages, limiter, token_callback)
 
-    # ── 拒收「伪最终」：工具调用文本 / 过短正文 ──
-    # 完整方案通常 >800 字；<120 基本是截断或伪输出
-    if _looks_like_tool_dump(output) or len((output or "").strip()) < 120:
-        logger.warning(
-            f"  ⚠️ [{agent['label']}] 最终输出无效（len={len(output or '')}），强制重写…"
-        )
-        rewrite_msg = (
-            "不要输出任何工具调用、JSON 或 XML 标签。\n"
-            "请只根据已有对话中的工具结果，输出完整、可读的最终 Markdown 正文。\n"
-            "必须包含分节标题；信息缺失处写「暂无数据」，不要中断。\n"
-            "禁止以 <tool_call> 或 { 开头。"
-        )
-        try:
-            resp = rate_limited_call(
-                limiter,
-                client.chat.completions.create,
-                model=settings.llm_model,
-                messages=messages + [
-                    {
-                        "role": "assistant",
-                        "content": (output or "")[:400] or "(空)",
-                    },
-                    {"role": "user", "content": rewrite_msg},
-                ],
-                temperature=settings.llm_temperature,
-                max_tokens=4096,
-            )
-            rewritten = (resp.choices[0].message.content or "").strip()
-            _note_llm_io(messages, rewritten)
-            ok = (
-                rewritten
-                and not _looks_like_tool_dump(rewritten)
-                and len(rewritten) >= 80
-            )
-            if ok:
-                output = rewritten
-            else:
-                # 重写仍失败：无 tools 再生成一次，绝不把伪正文当方案
-                logger.warning(f"  ⚠️ [{agent['label']}] 重写仍无效，无工具再生成一次")
-                output = _stream_final_output(
-                    client,
-                    agent,
-                    messages
-                    + [
-                        {
-                            "role": "user",
-                            "content": (
-                                "请输出完整旅行方案 Markdown 正文。"
-                                "禁止工具调用。缺失写「暂无数据」。"
-                            ),
-                        }
-                    ],
-                    limiter,
-                    token_callback=None,  # 外层统一推送，避免脏流先到前端
-                )
-                if _looks_like_tool_dump(output) or len((output or "").strip()) < 80:
-                    output = "（生成失败：未能产出有效正文，请重试或改用 single 模式）"
-        except Exception as e:
-            logger.warning(f"  强制重写失败: {e}")
-            if _looks_like_tool_dump(output) or len((output or "").strip()) < 80:
-                output = "（生成失败：模型未返回有效正文）"
+    # ── 拒收「伪最终」（逻辑见 _ensure_valid_final_output）──
+    output = _ensure_valid_final_output(client, agent, messages, output, limiter)
 
     # ── 自我反思（可关）──
     output = _self_reflect(
