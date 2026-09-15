@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     llm_max_retries: int = 3
     llm_timeout: int = 120
+    # 单次生成的最大 token 数。本项目用的 mimo-v2.5-pro 是思维链模型，
+    # 它会先输出一段 reasoning_content 再写正文；4096 会被思维链吃满导致
+    # 正文为空（实测 finish_reason=length / content 长度 0），故给足余量。
+    llm_max_tokens: int = 8192
 
     # ── 搜索工具 ──────────────────────────────────────────
     search_max_results: int = 5

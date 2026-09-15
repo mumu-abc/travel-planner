@@ -85,6 +85,7 @@ from app.tool_metrics import (
     OK_RETRY,
     OK_FALLBACK,
     FAILED,
+    TERMINAL,
     # 用别名：本模块已有一个同名的 AgentTrace.tool_calls 记录类型，避免覆盖
     ToolCallRecord as ToolMetricRecord,
     get_tool_metrics,
@@ -328,8 +329,12 @@ def _execute_tool(name: str, arguments: dict) -> dict:
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     get_tool_metrics().record_raw(name, bool(result.get("success")), elapsed_ms)
 
-    if result.get("success") and cache.enabled:
-        # 只缓存成功结果：缓存失败会把一次瞬时故障固化成持久故障
+    # 只缓存「成功」与「终局结论」两类结果：
+    #   - 成功：复用省时间
+    #   - 终局结论：确定性的（知识库有没有这个城市不会在两次调用间改变），
+    #     不缓存的话同一个未覆盖目的地会被反复问，每次白跑一遍 5s 检索
+    # 唯独不缓存「执行失败」：那会把一次瞬时故障固化成持久故障。
+    if (result.get("success") or result.get("terminal")) and cache.enabled:
         cache.set(key, {k: v for k, v in result.items() if not k.startswith("_")})
     return result
 
@@ -368,6 +373,9 @@ def _execute_tool_uncached(name: str, arguments: dict) -> dict:
                             else "联网搜索当前不可用")
                     return {
                         "success": False,
+                        # terminal=True 表示「这是个确定结论，不是执行故障」：
+                        # 重试和降级都救不了它，重试只会白等一轮。
+                        "terminal": True,
                         "text": f"知识库未覆盖「{dest}」，本地无可用资料。{hint}；"
                                 f"两者都无结果时，请直接告知用户「暂不支持该目的地」，"
                                 f"不要用其它城市的内容代替。",
@@ -512,7 +520,13 @@ def _adapt_args(orig_tool: str, fallback_tool: str, args: dict) -> dict:
             return {"query": f"{args.get('destination', '')} travel budget costs"}
         return {"query": str(args)}
     if fallback_tool == "search_knowledge":
-        return {"query": str(args.get("query", args.get("destination", "")))}
+        # destination 必须一起带上：search_knowledge 靠它做归属过滤，
+        # 缺失时会退化成「全库找语义最近」，库外目的地会命中无关城市
+        # （实测梅州 → 吉隆坡/新加坡，见 docs/缺陷记录_检索静默失败.md）
+        return {
+            "query": str(args.get("query") or args.get("destination") or ""),
+            "destination": str(args.get("destination") or ""),
+        }
     return args
 
 
@@ -553,6 +567,7 @@ def _execute_tool_with_recovery(
     trace: AgentTrace,
     max_retries: int = 1,
     destination: str = "",
+    ledger: Optional["_DataLedger"] = None,
 ) -> str:
     """
     带错误恢复的工具执行：
@@ -560,6 +575,11 @@ def _execute_tool_with_recovery(
       2. 失败则重试一次
       3. 仍失败则尝试 fallback 工具
       4. 全部失败则返回降级提示
+
+    ledger 非空时，把「这次逻辑调用有没有拿到有效数据」记进账本，
+    供上层判断是否属于无解任务（详见 _DataLedger）。
+    记账在此处做而不是在调用方：只有这里能拿到结构化的 result，
+    靠解析返回文本判断成败太脆（"知识库未找到相关信息"这类文案会漏判）。
     """
     started = time.perf_counter()
     result = _execute_tool(name, _normalize_tool_args(name, arguments, destination))
@@ -567,6 +587,18 @@ def _execute_tool_with_recovery(
 
     if result["success"]:
         _record_tool_outcome(name, OK, started, cached=cached)
+        if ledger is not None:
+            ledger.record(name, result["text"], ok=True)
+        return result["text"]
+
+    # ── 终局结论：这是确定答案，不是执行故障 ──
+    # 典型场景：知识库未覆盖该目的地。重试和降级都改变不了结论，
+    # 但重试要白等一轮、降级还要再跑一次搜索，库外城市会被反复问同一件事
+    # （实测同一工具被调用 4 次，8 轮额度烧光，耗时 60s → 250s）。
+    if result.get("terminal"):
+        _record_tool_outcome(name, TERMINAL, started, cached=cached)
+        if ledger is not None:
+            ledger.record(name, result["text"], ok=False)
         return result["text"]
 
     # ── 重试一次 ──
@@ -577,6 +609,8 @@ def _execute_tool_with_recovery(
         cached = bool(result.get("_cached"))
         if result["success"]:
             _record_tool_outcome(name, OK_RETRY, started, retries=1, cached=cached)
+            if ledger is not None:
+                ledger.record(name, result["text"], ok=True)
             return result["text"]
 
     # ── 尝试 fallback ──
@@ -590,6 +624,10 @@ def _execute_tool_with_recovery(
         logger.warning(f"  🔄 [{agent_name}] {name} 失败，降级到 {fallback}")
         trace.retries += 1
         adapted_args = _adapt_args(name, fallback, arguments)
+        # 补最后一道 destination 兜底：无论 _adapt_args 有没有带，
+        # 都把本次规划的目的地塞进去，避免降级检索退化成全库搜索命中无关城市
+        if destination and not adapted_args.get("destination"):
+            adapted_args["destination"] = destination
         fallback_result = _execute_tool(fallback, adapted_args)
         attempts += 1
         if fallback_result["success"]:
@@ -601,6 +639,9 @@ def _execute_tool_with_recovery(
                 fallback_to=fallback,
                 cached=bool(fallback_result.get("_cached")),
             )
+            if ledger is not None:
+                # 降级拿到的数据同样算数，但记在 fallback 工具名下
+                ledger.record(fallback, fallback_result["text"], ok=True)
             return f"[降级自 {name} → {fallback}] {fallback_result['text']}"
 
     # ── 全部失败：返回降级提示 ──
@@ -611,6 +652,8 @@ def _execute_tool_with_recovery(
         retries=max(0, attempts - 1),
         error=str(result.get("text", ""))[:200],
     )
+    if ledger is not None:
+        ledger.record(name, str(result.get("text", "")), ok=False)
     return (
         f"⚠️ 工具 {name} 及其降级方案均执行失败。"
         f"请基于已有信息继续生成，缺失的部分标注'暂无数据'。"
@@ -626,7 +669,14 @@ def _stream_final_output(
     limiter,
     token_callback: Optional[Callable[[str, str], None]] = None,
 ) -> str:
-    """流式或非流式生成最终输出"""
+    """流式或非流式生成最终输出。
+
+    注意：本项目的 LLM 是思维链模型（mimo-v2.5-pro），它回答前会先生成
+    一段 reasoning_content。若 max_tokens 被思维链吃满，content 会是空串
+    （实测 finish_reason=length / content 长度 0）。所以这里：
+      1. 给足 token 预算（思维链 + 正文），而不是只按正文估；
+      2. 拿到空文本时降级为一次非流式重试，并按 finish_reason 记录原因。
+    """
     from app.concurrency import rate_limited_call
 
     if token_callback:
@@ -636,29 +686,48 @@ def _stream_final_output(
             model=settings.llm_model,
             messages=messages,
             temperature=settings.llm_temperature,
-            max_tokens=4096,
+            max_tokens=settings.llm_max_tokens,
             stream=True,
         )
         output = ""
+        finish = ""
         for chunk in stream:
-            delta = chunk.choices[0].delta.content
+            if chunk.choices and chunk.choices[0].finish_reason:
+                finish = chunk.choices[0].finish_reason
+            delta = chunk.choices[0].delta.content if chunk.choices else None
             if delta:
                 output += delta
                 token_callback(agent["name"], delta)
         _note_llm_io(messages, output)
-        return output
-    else:
-        resp = rate_limited_call(
-            limiter,
-            client.chat.completions.create,
-            model=settings.llm_model,
-            messages=messages,
-            temperature=settings.llm_temperature,
-            max_tokens=4096,
+        if output.strip():
+            return output
+        # 空输出：很可能是思维链吃满 token，非流式再要一次
+        logger.warning(
+            f"  ⚠️ [{agent['label']}] 流式输出为空（finish_reason={finish}），"
+            f"改用非流式重试"
         )
-        text = resp.choices[0].message.content or ""
-        _note_llm_io(messages, text)
-        return text
+        if finish == "length":
+            messages = messages + [{
+                "role": "user",
+                "content": "请直接输出方案正文，省略思考过程，不要重复分析。",
+            }]
+
+    resp = rate_limited_call(
+        limiter,
+        client.chat.completions.create,
+        model=settings.llm_model,
+        messages=messages,
+        temperature=settings.llm_temperature,
+        max_tokens=settings.llm_max_tokens,
+    )
+    text = resp.choices[0].message.content or ""
+    if not text.strip():
+        logger.warning(
+            f"  ⚠️ [{agent['label']}] 非流式输出仍为空"
+            f"（finish_reason={resp.choices[0].finish_reason}）"
+        )
+    _note_llm_io(messages, text)
+    return text
 
 
 def _self_reflect(
@@ -720,9 +789,21 @@ def _self_reflect(
                 model=settings.llm_model,
                 messages=fix_messages,
                 temperature=settings.llm_temperature,
-                max_tokens=4096,
+                max_tokens=settings.llm_max_tokens,
             )
-            output = fix_resp.choices[0].message.content or output
+            fixed = (fix_resp.choices[0].message.content or "").strip()
+            # 修正结果必须比原文更像正文才采纳：
+            # 模型在"修正"这一步经常直接回一句 PASS / 好的 / 已修正，
+            # 或者返回空，直接把已有正文覆盖成垃圾（实测最终输出就变成 "PASS"）
+            if _is_valid_plan_text(fixed, min_len=80):
+                output = fixed
+            elif fixed:
+                logger.warning(
+                    f"  ⚠️ [{agent['label']}] 修正结果不像正文（{fixed[:40]!r}），"
+                    f"保留原输出"
+                )
+            else:
+                logger.warning(f"  ⚠️ [{agent['label']}] 修正结果为空，保留原输出")
             trace.reflection_passed = False
         else:
             trace.reflection_passed = True
@@ -759,6 +840,63 @@ class _ToolBudget:
         }
 
 
+class _DataLedger:
+    """记录本次规划「拿到了哪些类别的真实数据」。
+
+    存在的意义是识别「无解任务」：目的地不在知识库、联网也拿不到有效内容时，
+    模型会反复换词重试同一个工具（实测 search_knowledge 被调 8 次，6 次
+    得到同一句「未覆盖」），然后花两百多秒硬凑一篇满是「暂无数据」的长文。
+    与其让它空转再硬写，不如早点让它承认数据不足。
+    """
+
+    # 哪些工具能提供「景点类」数据。判断无解任务时只看这一类：
+    # 没有景点就没法做行程，而天气/汇率这类边角数据有也不解决问题。
+    CORE_TOOLS = ("search_knowledge", "search_attraction_context", "web_search")
+
+    def __init__(self) -> None:
+        import threading as _t
+        self._lock = _t.Lock()
+        self.filled: set[str] = set()
+        self.empty: set[str] = set()
+        self.core_filled: set[str] = set()
+        self.tool_calls = 0
+        self.empty_calls = 0
+
+    def record(self, tool: str, result_text: str, ok: bool) -> None:
+        with self._lock:
+            self.tool_calls += 1
+            if ok:
+                self.filled.add(tool)
+                if tool in self.CORE_TOOLS:
+                    self.core_filled.add(tool)
+            else:
+                self.empty_calls += 1
+                self.empty.add(tool)
+
+    @property
+    def hopeless(self) -> bool:
+        """是否已可判定「数据不足以支撑完整方案」。
+
+        条件：景点类数据一个都没拿到 + 至少试过 4 次工具 + 空手率过半。
+        宁可错杀（提前给诚实短答）也不要放过：一个 20 秒的诚实回复
+        对用户的价值，高于 250 秒的满屏「暂无数据」。
+        """
+        with self._lock:
+            if self.core_filled:
+                return False
+            return self.tool_calls >= 4 and self.empty_calls / self.tool_calls >= 0.5
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "filled": sorted(self.filled),
+                "core_filled": sorted(self.core_filled),
+                "empty": sorted(self.empty),
+                "tool_calls": self.tool_calls,
+                "empty_calls": self.empty_calls,
+            }
+
+
 def _process_tool_calls(
     agent: dict,
     tool_calls: list,
@@ -767,6 +905,7 @@ def _process_tool_calls(
     event_callback: Optional[Callable[[dict], None]] = None,
     destination: str = "",
     tool_budget: Optional[_ToolBudget] = None,
+    ledger: Optional["_DataLedger"] = None,
 ) -> None:
     """执行工具调用并将结果追加到消息列表"""
     for tc in tool_calls:
@@ -790,7 +929,10 @@ def _process_tool_calls(
                 "content": f"{func_name}({json.dumps(func_args, ensure_ascii=False)[:200]})",
             })
 
-        result = _execute_tool_with_recovery(func_name, func_args, agent["name"], trace, destination=destination)
+        result = _execute_tool_with_recovery(
+            func_name, func_args, agent["name"], trace,
+            destination=destination, ledger=ledger,
+        )
 
         trace.tool_calls.append(ToolCallRecord(
             agent=agent["name"],
@@ -882,7 +1024,7 @@ def _ensure_valid_final_output(
                 {"role": "user", "content": rewrite_msg},
             ],
             temperature=settings.llm_temperature,
-            max_tokens=4096,
+            max_tokens=settings.llm_max_tokens,
         )
         rewritten = (resp.choices[0].message.content or "").strip()
         _note_llm_io(messages, rewritten)
@@ -943,6 +1085,7 @@ def _run_agent_with_tools(
     ]
 
     output = ""
+    ledger = _DataLedger()
 
     for round_idx in range(max_tool_rounds):
         resp = rate_limited_call(
@@ -952,7 +1095,7 @@ def _run_agent_with_tools(
             messages=messages,
             tools=TOOLS,
             temperature=settings.llm_temperature,
-            max_tokens=4096,
+            max_tokens=settings.llm_max_tokens,
         )
 
         msg = resp.choices[0].message
@@ -975,8 +1118,36 @@ def _run_agent_with_tools(
         # ── 执行工具调用 ──
         _process_tool_calls(
             agent, msg.tool_calls, messages, trace, event_callback,
-            destination=destination, tool_budget=tool_budget,
+            destination=destination, tool_budget=tool_budget, ledger=ledger,
         )
+
+        # ── 无解任务提前收束 ──
+        # 目的地不在知识库、联网也没拿到有效景点数据时，继续转下去只会
+        # 反复问同一个问题（实测 8 次工具调用里 6 次空手），最后硬写一篇
+        # 满是「暂无数据」的长文，耗时 250s。这里直接引导它给出诚实短答。
+        if ledger.hopeless:
+            logger.warning(
+                f"  🛑 [{agent['label']}] 判定数据不足以支撑完整方案"
+                f"（{ledger.snapshot()}），提前收束"
+            )
+            if event_callback:
+                event_callback({
+                    "type": "thought", "agent": agent["name"],
+                    "content": "关键数据缺失，改为输出诚实说明…",
+                })
+            messages.append({
+                "role": "user",
+                "content": (
+                    "【系统提示】检测到当前目的地缺少可用的本地资料，联网也未能取到"
+                    "景点等关键信息。请立即停止调用工具，直接输出一份简短的诚实答复：\n"
+                    "1. 说明该目的地的本地资料暂未收录；\n"
+                    "2. 只写确实拿到的信息（如天气），拿不到的不要猜、不要编；\n"
+                    "3. 建议用户换一个已支持的目的地，或配置联网搜索 API；\n"
+                    "4. 总长控制在 300 字以内，不要分五个板块硬凑。"
+                ),
+            })
+            output = _stream_final_output(client, agent, messages, limiter, token_callback)
+            break
     else:
         # 工具轮次耗尽，强制生成最终输出
         output = _stream_final_output(client, agent, messages, limiter, token_callback)
@@ -985,10 +1156,20 @@ def _run_agent_with_tools(
     output = _ensure_valid_final_output(client, agent, messages, output, limiter)
 
     # ── 自我反思（可关）──
+    validated = output
     output = _self_reflect(
         client, agent, messages, output, trace, limiter, event_callback,
         enabled=enable_reflection,
     )
+
+    # 反思是正文校验之后的一道后门：它可能把已通过的正文改坏。
+    # 这里做最后一道闸——反思把输出改废了就退回校验前的那一版。
+    if not _is_valid_plan_text(output, min_len=80) and _is_valid_plan_text(validated, min_len=80):
+        logger.warning(
+            f"  ⚠️ [{agent['label']}] 反思后输出无效（{len(output or '')}字），"
+            f"回退到反思前版本"
+        )
+        output = validated
 
     # ── 最终输出推送（反思后再推送，确保流式内容与最终结果一致）──
     if token_callback and output:
