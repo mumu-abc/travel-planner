@@ -323,11 +323,16 @@ class TestWebSearchMocked:
             assert "Wikipedia" in sources
         reset_backend_state()
 
-    def test_bing_is_first_backend(self):
-        """必应必须是首选后端：国内唯一可达源"""
+    def test_bing_is_first_keyless_backend(self):
+        """必应是免密钥后端里的首选：国内唯一可达源。
+
+        （官方 API 排在它前面，但要配 key 才启用。）
+        """
         from app.tools import web_search as ws
 
-        assert ws.BACKEND_ORDER[0] == "bing"
+        assert ws.BACKEND_ORDER[0] == "official"
+        assert ws.BACKEND_ORDER.index("bing") < ws.BACKEND_ORDER.index("duckduckgo")
+        assert ws.BACKEND_ORDER.index("bing") < ws.BACKEND_ORDER.index("wikipedia")
 
     def test_web_search_short_circuits_when_all_backends_down(self):
         """全部后端冷却时应立刻返回，不再等满超时（快失败）"""
@@ -355,6 +360,84 @@ class TestWebSearchMocked:
 
         assert web_search("", max_results=3) == []
         assert web_search("   ", max_results=3) == []
+
+
+class TestOfficialSearchBackends:
+    """国内官方搜索 API 后端（智谱 / 百度 / 博查）接线测试。
+
+    背景：必应 RSS 是未公开接口（临时方案），官方 API 才是正式方案。
+    这里不真调 API（没有 key），只验证「配置→选择→降级」这条链路。
+    """
+
+    def test_no_key_means_official_backend_skipped(self):
+        from app.tools import web_search as ws
+
+        assert ws.available_official_providers() == []
+        assert ws._backend_usable("official") is False
+
+    def test_official_is_first_in_order(self):
+        """官方 API 有 key 时应优先于免密钥的必应 RSS。"""
+        from app.tools import web_search as ws
+
+        assert ws.BACKEND_ORDER[0] == "official"
+        assert "bing" in ws.BACKEND_ORDER
+
+    def test_provider_selected_when_key_present(self):
+        from app.tools import web_search as ws
+        from app.config import settings
+
+        settings.zhipu_api_key = "test-key"
+        try:
+            assert ws.available_official_providers() == ["zhipu"]
+            assert ws._backend_usable("official") is True
+        finally:
+            settings.zhipu_api_key = ""
+
+    def test_explicit_provider_wins(self):
+        from app.tools import web_search as ws
+        from app.config import settings
+
+        settings.zhipu_api_key = "k1"
+        settings.bocha_api_key = "k2"
+        settings.search_api_provider = "bocha"
+        try:
+            assert ws.available_official_providers() == ["bocha"]
+        finally:
+            settings.zhipu_api_key = ""
+            settings.bocha_api_key = ""
+            settings.search_api_provider = ""
+
+    def test_broken_key_does_not_break_fallback_chain(self):
+        """官方 API key 错了也不该拖垮整体：应继续落到必应。"""
+        from app.tools import web_search as ws
+        from app.config import settings
+
+        settings.zhipu_api_key = "definitely-invalid-key"
+        ws.reset_backend_state()
+        try:
+            with patch.object(ws, "_zhipu_search", return_value=[]), \
+                 patch.object(ws, "_bing_search", return_value=[
+                     {"title": "T", "snippet": "s", "url": "", "source": "Bing"}
+                 ]):
+                results = ws.web_search("东京 景点", max_results=1)
+            assert len(results) == 1
+            assert results[0]["source"] == "Bing"
+        finally:
+            settings.zhipu_api_key = ""
+            ws.reset_backend_state()
+
+    def test_get_setting_falls_back_to_env(self):
+        """配置模块读不到时退回环境变量（脚本单独跑时也要能用）。"""
+        import os
+
+        from app.tools import web_search as ws
+
+        os.environ["BOCHA_API_KEY"] = "env-key"
+        try:
+            with patch.dict("sys.modules", {"app.config": None}):
+                assert ws._get_setting("bocha_api_key") == "env-key"
+        finally:
+            os.environ.pop("BOCHA_API_KEY", None)
 
 
 # ── 价格解析测试 ────────────────────────────────────────────

@@ -28,6 +28,20 @@ class Settings(BaseSettings):
     # ── 搜索工具 ──────────────────────────────────────────
     search_max_results: int = 5
 
+    # 联网搜索的官方 API 密钥（可选，留空则退回免密钥后端）。
+    # 实测（2026-09 无代理国内网络）这些域名全部可达且 0.2~0.3s 响应：
+    #   智谱   open.bigmodel.cn   ¥0.01/次
+    #   百度   qianfan.baidubce.com  1500 次/月免费
+    #   博查   api.bochaai.com  面向 AI 的搜索
+    # 任何一个填了就会自动排到必应 RSS 前面（官方接口有 SLA，比未公开接口可靠）。
+    # provider 留空 = 自动按「谁有 key 用谁」的顺序挑。
+    search_api_provider: str = ""          # zhipu | baidu | bocha | ""（自动）
+    zhipu_api_key: str = ""
+    baidu_search_api_key: str = ""
+    bocha_api_key: str = ""
+    # 官方 API 调用超时（秒）
+    search_api_timeout: int = 10
+
     # ── 并发控制 ──────────────────────────────────────────
     rate_limit_rps: float = 10.0      # 每秒最大请求数
     rate_limit_concurrent: int = 5     # 最大并发请求数
