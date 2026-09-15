@@ -312,6 +312,21 @@ _CATEGORY_ALIASES = {
 }
 
 
+def is_destination_covered(destination: Optional[str]) -> bool:
+    """
+    知识库是否覆盖该目的地。
+
+    用于检索入口的前置校验。库外城市（如「梅州五华」）走向量检索会命中语义
+    相近的其它城市内容（吉隆坡 / 孟买 / 布宜诺斯艾利斯…）——内容为真但与查询
+    无关，且因为没有假事实，比幻觉更难被发现。
+    详见 docs/缺陷记录_检索静默失败.md
+    """
+    if not destination or not destination.strip():
+        return True  # 未指定目的地 → 不做覆盖校验，沿用原有不过滤的行为
+    dest = destination.strip()
+    return any(dest in name or name in dest for name in DESTINATIONS)
+
+
 def search_knowledge(
     query: str,
     destination: Optional[str] = None,
@@ -323,37 +338,44 @@ def search_knowledge(
     if category:
         category = _CATEGORY_ALIASES.get(category.lower(), category.lower())
 
-    _init_index()
-
-    query_vec = _model.encode([query], normalize_embeddings=True).astype("float32")
-    search_k = min(top_k * 4, len(_chunks))
-    semantic_scores, semantic_indices = _index.search(query_vec, search_k)
-
-    semantic_results = {}
-    for score, idx in zip(semantic_scores[0], semantic_indices[0]):
-        if idx >= 0:
-            semantic_results[int(idx)] = float(score)
-
-    if hybrid:
-        bm25_results = _bm25_search(query, top_k=top_k * 4)
-        if bm25_results:
-            max_bm25 = max(s for _, s in bm25_results)
-            bm25_normalized = {idx: s / max_bm25 for idx, s in bm25_results}
-        else:
-            bm25_normalized = {}
-
-        alpha = 0.7
-        beta = 0.3
-        all_indices = set(semantic_results.keys()) | set(bm25_normalized.keys())
-        combined_scores = {}
-        for idx in all_indices:
-            combined_scores[idx] = (
-                alpha * semantic_results.get(idx, 0) + beta * bm25_normalized.get(idx, 0)
-            )
+    # 覆盖校验（总闸）：kNN 没有「拒答」能力，库外目的地必然返回无关城市的内容。
+    # 这里直接跳过向量/BM25 检索并提前返回；用户上传的文档仍可命中（见下方）。
+    skip_vector = not is_destination_covered(destination)
+    if skip_vector:
+        logger.info(f"知识库未覆盖「{destination}」，跳过向量/BM25 检索")
+        ranked = []
     else:
-        combined_scores = semantic_results
+        _init_index()
 
-    ranked = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+        query_vec = _model.encode([query], normalize_embeddings=True).astype("float32")
+        search_k = min(top_k * 4, len(_chunks))
+        semantic_scores, semantic_indices = _index.search(query_vec, search_k)
+
+        semantic_results = {}
+        for score, idx in zip(semantic_scores[0], semantic_indices[0]):
+            if idx >= 0:
+                semantic_results[int(idx)] = float(score)
+
+        if hybrid:
+            bm25_results = _bm25_search(query, top_k=top_k * 4)
+            if bm25_results:
+                max_bm25 = max(s for _, s in bm25_results)
+                bm25_normalized = {idx: s / max_bm25 for idx, s in bm25_results}
+            else:
+                bm25_normalized = {}
+
+            alpha = 0.7
+            beta = 0.3
+            all_indices = set(semantic_results.keys()) | set(bm25_normalized.keys())
+            combined_scores = {}
+            for idx in all_indices:
+                combined_scores[idx] = (
+                    alpha * semantic_results.get(idx, 0) + beta * bm25_normalized.get(idx, 0)
+                )
+        else:
+            combined_scores = semantic_results
+
+        ranked = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
 
     results = []
     for idx, score in ranked:

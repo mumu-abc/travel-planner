@@ -131,3 +131,47 @@ class TestConfigFlags:
         assert settings.pipeline_mode in ("multi", "sequential", "single")
         assert settings.max_tool_rounds >= 1
         assert settings.max_web_search_calls >= 0
+
+
+class TestOutOfDomainRetrieval:
+    """回归：库外目的地必须拒答，不能返回语义相近的其它城市内容。
+
+    详见 docs/缺陷记录_检索静默失败.md
+    """
+
+    def test_covered_destinations(self):
+        from app.tools.knowledge_search import is_destination_covered
+        assert is_destination_covered("东京")
+        assert is_destination_covered("吉隆坡")
+        assert not is_destination_covered("梅州五华")
+        # 未指定目的地时不拦截，沿用原有不过滤行为
+        assert is_destination_covered("")
+        assert is_destination_covered(None)
+
+    def test_out_of_domain_returns_empty(self):
+        from app.tools.knowledge_search import search_knowledge
+        results = search_knowledge(query="梅州五华 景点", destination="梅州五华", top_k=5)
+        assert results == []
+
+    def test_in_domain_still_returns_own_city(self):
+        from app.tools.knowledge_search import search_knowledge
+        results = search_knowledge(query="东京 景点", destination="东京", top_k=5)
+        assert results
+        assert all(r["destination"] == "东京" for r in results)
+
+    def test_no_destination_keeps_legacy_behaviour(self):
+        """不传 destination 时不能被误伤 —— 既有调用方依赖这个行为。"""
+        from app.tools.knowledge_search import search_knowledge
+        assert search_knowledge(query="东京", top_k=3)
+
+    def test_normalize_backfills_destination(self):
+        """LLM 漏传 destination 时必须用本次规划的目的地兜底。"""
+        from app.crew import _normalize_tool_args
+        args = _normalize_tool_args("search_knowledge", {"query": "景点"}, destination="东京")
+        assert args["destination"] == "东京"
+
+    def test_tool_message_distinguishes_not_covered(self):
+        from app.crew import _execute_tool
+        out = _execute_tool("search_knowledge", {"query": "景点", "destination": "梅州五华"})
+        assert out["success"] is False
+        assert "未覆盖" in out["text"]
