@@ -251,10 +251,13 @@ class TestCrewBuild:
 
     def test_looks_like_tool_dump(self):
         """工具调用伪正文应被识别"""
-        from app.crew import _looks_like_tool_dump
+        from app.crew import _looks_like_tool_dump, _is_valid_plan_text
         assert _looks_like_tool_dump("")
         assert _looks_like_tool_dump('<tool_call>\n{"destination":"东京"}\n')
+        assert _looks_like_tool_dump('function=search_knowledge')
         assert not _looks_like_tool_dump("# 东京行程\n\n## Day 1\n" + "详细内容" * 80)
+        assert not _is_valid_plan_text("太短")
+        assert _is_valid_plan_text("# 方案\n" + "x" * 200)
 
     def test_build_travel_crew_signature(self):
         """build_travel_crew 应接受正确参数"""
