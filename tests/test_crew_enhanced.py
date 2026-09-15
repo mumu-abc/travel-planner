@@ -192,6 +192,27 @@ class TestFallbackPlan:
             assert "东京" in result
             assert "离线版" in result
 
+    def test_fallback_plan_out_of_domain_has_no_foreign_cities(self):
+        """库外目的地不得混入其它城市的内容。
+
+        回归测试：旧版本调 search_knowledge 时漏传 destination，
+        导致查「梅州五华」返回吉隆坡 / 孟买 / 布宜诺斯艾利斯的内容
+        ——内容皆为真，但与查询完全无关。
+        详见 docs/缺陷记录_检索静默失败.md
+        """
+        from app.crew import _generate_fallback_plan
+
+        with patch("app.crew.optimize_route_from_knowledge", side_effect=Exception("无数据")), \
+             patch("app.crew.optimize_budget", side_effect=Exception("无数据")), \
+             patch("app.crew.get_weather", side_effect=Exception("无数据")):
+            # search_knowledge 故意不 mock —— 必须走真实检索才能覆盖这个 bug
+            result = _generate_fallback_plan("梅州五华", 3, 1500, "美食")
+
+        section = result.split("## 🗺️")[0]
+        for city in ("吉隆坡", "孟买", "布宜诺斯艾利斯", "巴黎", "纽约", "首尔"):
+            assert city not in section, f"库外查询混入了无关城市内容：{city}"
+        assert "暂未覆盖" in section
+
 
 # ── 动态路由测试 ────────────────────────────────────────────
 
