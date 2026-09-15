@@ -57,7 +57,12 @@ except ImportError:
         return client
 from app.tools.real_weather import get_weather, format_weather
 from app.tools.real_exchange import get_exchange_rate, format_exchange
-from app.tools.knowledge_search import search_knowledge, format_search_results, search_with_context
+from app.tools.knowledge_search import (
+    search_knowledge,
+    format_search_results,
+    search_with_context,
+    is_destination_covered,
+)
 from app.tools.route_optimizer import optimize_route_from_knowledge, format_optimized_route
 from app.tools.budget_optimizer import optimize_budget, format_budget_plans
 from app.tools.web_search import web_search, format_web_search
@@ -209,7 +214,8 @@ TOOLS = [
                     },
                     "destination": {
                         "type": "string",
-                        "description": "限定城市（可选）",
+                        "description": "限定城市（必填）。缺失时检索会命中语义相近的其它城市内容，"
+                                       "因此调用方会自动用本次规划的目的地兜底",
                     },
                     "category": {
                         "type": "string",
@@ -217,7 +223,7 @@ TOOLS = [
                         "description": "限定类别（可选）：attraction=景点, restaurant=餐厅, transport=交通, budget=预算, safety=安全, basic=基本信息",
                     },
                 },
-                "required": ["query"],
+                "required": ["query", "destination"],
             },
         },
     },
@@ -350,6 +356,15 @@ def _execute_tool_uncached(name: str, arguments: dict) -> dict:
                 top_k=5,
             )
             if not results:
+                dest = arguments.get("destination") or ""
+                if dest and not is_destination_covered(dest):
+                    # 区分「库里没有这个城市」和「城市有但没查到」——
+                    # 前者应换城市或走 web_search，后者只是这次没命中
+                    return {
+                        "success": False,
+                        "text": f"知识库未覆盖「{dest}」，本地无可用资料。"
+                                f"建议改用 web_search 联网查询，或提示用户换一个城市。",
+                    }
                 return {"success": False, "text": "知识库未找到相关信息"}
             return {"success": True, "text": format_search_results(results)}
 
@@ -423,6 +438,10 @@ def _normalize_tool_args(name: str, args: dict, destination: str = "") -> dict:
                 or fallback_dest
                 or "travel"
             )
+        # destination 必须带上：缺失时检索不做归属过滤，库外目的地会命中
+        # 语义相近的其它城市内容（详见 docs/缺陷记录_检索静默失败.md）
+        if not adapted.get("destination"):
+            adapted["destination"] = fallback_dest
 
     elif name == "get_exchange_rate":
         if "amount_usd" not in adapted:
