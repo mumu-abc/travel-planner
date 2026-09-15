@@ -662,6 +662,33 @@ def _execute_tool_with_recovery(
 
 # ── 统一 Agent 执行引擎（Function Calling）────────────────────
 
+def _budget_for_chars(chars: int, floor: int = 2048) -> int:
+    """把「目标正文字数」换算成 max_tokens 预算。
+
+    为什么不能直接让 prompt 管住长度：实测模型会无视 prompt 里的
+    「1800~2800 字」，一路写到 6000+ 字，而生成时间跟字数近乎线性
+    （东京 163s / 6200 字），也就是说「慢」几乎全由写长撑起来。
+    与其反复加提示词（它不听），不如在物理层面掐住额度：写不出来就打住。
+
+    换算 = 正文额度 + 思维链预留，而不是乘一个系数：
+      - 正文：中文约 1.5~2 token/字，取 2.0；
+      - 思维链：与正文长度不成正比（实测写 6000 字时思考约 1500~2500 token），
+        所以给它一个固定预留 2500，而不是按比例放大 —— 按比例算会让
+        3200 字的目标反而算出一个「不设限」的额度，等于没管。
+    """
+    import math
+
+    if chars <= 0:
+        return settings.llm_max_tokens
+    body = math.ceil(chars * 2.0)
+    need = body + _THINKING_RESERVE
+    return max(floor, min(settings.llm_max_tokens, need))
+
+
+# 思维链模型的固定思考预留（token）。取实测天花板 2500。
+_THINKING_RESERVE = 2500
+
+
 def _stream_final_output(
     client: OpenAI,
     agent: dict,
@@ -676,8 +703,11 @@ def _stream_final_output(
     （实测 finish_reason=length / content 长度 0）。所以这里：
       1. 给足 token 预算（思维链 + 正文），而不是只按正文估；
       2. 拿到空文本时降级为一次非流式重试，并按 finish_reason 记录原因。
+      3. 用 max_output_chars 反推 token 上限，从物理上限制篇幅以压缩耗时。
     """
     from app.concurrency import rate_limited_call
+
+    budget = _budget_for_chars(settings.max_output_chars)
 
     if token_callback:
         stream = rate_limited_call(
@@ -686,7 +716,7 @@ def _stream_final_output(
             model=settings.llm_model,
             messages=messages,
             temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
+            max_tokens=budget,
             stream=True,
         )
         output = ""
@@ -700,6 +730,11 @@ def _stream_final_output(
                 token_callback(agent["name"], delta)
         _note_llm_io(messages, output)
         if output.strip():
+            if finish == "length":
+                logger.info(
+                    f"  ℹ️ [{agent['label']}] 正文达字数上限被截断"
+                    f"（{len(output)} 字，额度 {budget} tokens），这是预期的压缩行为"
+                )
             return output
         # 空输出：很可能是思维链吃满 token，非流式再要一次
         logger.warning(
@@ -718,7 +753,7 @@ def _stream_final_output(
         model=settings.llm_model,
         messages=messages,
         temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
+        max_tokens=budget,
     )
     text = resp.choices[0].message.content or ""
     if not text.strip():
@@ -789,7 +824,7 @@ def _self_reflect(
                 model=settings.llm_model,
                 messages=fix_messages,
                 temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
+                max_tokens=_budget_for_chars(settings.max_output_chars),
             )
             fixed = (fix_resp.choices[0].message.content or "").strip()
             # 修正结果必须比原文更像正文才采纳：
@@ -1024,7 +1059,7 @@ def _ensure_valid_final_output(
                 {"role": "user", "content": rewrite_msg},
             ],
             temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
+            max_tokens=_budget_for_chars(settings.max_output_chars),
         )
         rewritten = (resp.choices[0].message.content or "").strip()
         _note_llm_io(messages, rewritten)
@@ -1095,7 +1130,9 @@ def _run_agent_with_tools(
             messages=messages,
             tools=TOOLS,
             temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
+            # 工具阶段只要「一个函数名 + 参数」，正文留给后面的生成阶段写。
+            # 这里给 8192 的话模型会顺手写一大段思考，纯粹增加延迟。
+            max_tokens=settings.llm_max_tokens_tool,
         )
 
         msg = resp.choices[0].message
@@ -1110,7 +1147,25 @@ def _run_agent_with_tools(
 
         # ── 无工具调用 → 最终输出 ──
         if not msg.tool_calls:
-            output = msg.content or ""
+            content = (msg.content or "").strip()
+            finish = resp.choices[0].finish_reason
+            # 边界：模型既没给工具调用、也没给正文（实测 finish_reason=tool_calls
+            # 却 content 为空）。此时若直接 break，会带着空 output 进入重写兜底，
+            # 白烧两轮 LLM。这里补一轮显式索要正文，拿到就正常结束。
+            if not content and round_idx < max_tool_rounds - 1:
+                logger.warning(
+                    f"  ⚠️ [{agent['label']}] 空回复（finish_reason={finish}），"
+                    f"要求直接输出正文（第 {round_idx + 1} 轮）"
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "请直接输出完整的旅行方案 Markdown 正文，不要再调用工具、"
+                        "不要只回复确认词。缺失的信息写「暂无数据」。"
+                    ),
+                })
+                continue
+            output = content
             break
 
         messages.append(msg)
