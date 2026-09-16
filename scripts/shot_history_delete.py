@@ -17,36 +17,47 @@ EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 
 PROBE = r"""
-window.addEventListener('load', function(){
-  try {
-    // 1) 打开历史抽屉
-    document.getElementById('historyDrawer').classList.add('open');
+(function(){
+  function paint(){
+    try {
+      var drawer = document.getElementById('historyDrawer');
+      var list   = document.getElementById('historyList');
+      if (!drawer || !list) { document.title = 'ERR no-el'; return; }
 
-    // 2) 塞入假数据（结构必须和 loadHistory 产出一致）
-    var rows = [
-      {dest:'广东梅州', days:3, budget:1000, date:'2026-09-16'},
-      {dest:'东京',     days:5, budget:2500, date:'2026-09-15'},
-      {dest:'巴黎',     days:4, budget:3000, date:'2026-09-14'},
-    ];
-    document.getElementById('historyList').innerHTML = rows.map(function(r, i){
-      var confirmCls = i === 0 ? ' confirming' : '';
-      var label = i === 0 ? '确认删除' : '✕';
-      return '<div class="history-card">'
-        + '<div class="hc-main">'
-        +   '<div class="dest">' + r.dest + '</div>'
-        +   '<div class="info">' + r.days + '天 · $' + r.budget + ' · ' + r.date + '</div>'
-        + '</div>'
-        + '<button class="hc-del' + confirmCls + '">' + label + '</button>'
-        + '</div>';
-    }).join('');
+      // 必须补 .open，否则抽屉还停在屏幕外（CSS 用 .drawer.open 才归位）
+      drawer.classList.add('open');
 
-    // 3) 让第一张卡片（待确认态）和其余卡片都保持按钮可见，
-    //    否则截图里只有 hover 才显示，看不到效果
-    document.querySelectorAll('.hc-del').forEach(function(b){
-      b.style.opacity = '1';
-    });
-  } catch(e) { document.title = 'ERR ' + e.message; }
-});
+      // loadHistory() 是 async 的，它回头会把我们塞的内容覆盖掉；
+      // 所以这里覆盖 window.fetch，让它的请求永远挂起，不再回写 DOM。
+      window.fetch = function(){ return new Promise(function(){}); };
+
+      var rows = [
+        {dest:'广东梅州', days:3, budget:1000, date:'2026-09-16'},
+        {dest:'东京',     days:5, budget:2500, date:'2026-09-15'},
+        {dest:'巴黎',     days:4, budget:3000, date:'2026-09-14'},
+      ];
+      list.innerHTML = rows.map(function(r, i){
+        var confirmCls = i === 0 ? ' confirming' : '';
+        var label      = i === 0 ? '确认删除' : '✕';
+        return '<div class="history-card">'
+          + '<div class="hc-main">'
+          +   '<div class="dest">' + r.dest + '</div>'
+          +   '<div class="info">' + r.days + '天 · $' + r.budget + ' · ' + r.date + '</div>'
+          + '</div>'
+          + '<button class="hc-del' + confirmCls + '">' + label + '</button>'
+          + '</div>';
+      }).join('');
+
+      // 截图里要看到按钮，正常态靠 hover 才显形，这里强制显示
+      document.querySelectorAll('.hc-del').forEach(function(b){ b.style.opacity = '1'; });
+
+      document.title = 'OK cards=' + document.querySelectorAll('.history-card').length;
+    } catch(e) { document.title = 'ERR ' + e.message; }
+  }
+  // 等 loadHistory 那一轮微任务先跑完，再覆盖
+  if (document.readyState === 'complete') setTimeout(paint, 0);
+  else window.addEventListener('load', function(){ setTimeout(paint, 0); });
+})();
 """
 
 
@@ -75,6 +86,19 @@ def main() -> int:
         print(f"  ✓ {png.name}  ({png.stat().st_size // 1024} KB)")
     else:
         print(f"  ✗ 截图失败: {r.stderr[:400]}")
+
+    # 顺带回读一次 DOM 状态，确认注入真的生效（别只靠肉眼看图）
+    dump = subprocess.run(
+        [EDGE, "--headless=new", "--disable-gpu",
+         "--virtual-time-budget=2500", "--dump-dom", tmp_html.as_uri()],
+        capture_output=True, text=True,
+    ).stdout
+    import re
+    m = re.search(r"<title>(.*?)</title>", dump, re.S)
+    print("  页面自检 ->", (m.group(1).strip() if m else "(读不到 title)"))
+    cards = dump.count('class="history-card"')
+    print("  DOM 里 history-card 数量 ->", cards)
+
     tmp_html.unlink(missing_ok=True)
     return 0
 
