@@ -74,8 +74,15 @@ def call(method: str, path: str, tk: str, payload: dict | None = None) -> dict:
 
 
 def git(*args: str) -> str:
+    """跑 git 并返回 stdout。
+
+    注意：默认 `core.quotepath=true` 会把非 ASCII 路径转义成 `\\351\\235\\242...`，
+    导致中文文件名被当成「删除」（git show 取不到内容 → 以为是删文件）。
+    这里统一关掉，让路径以真实 UTF-8 返回。
+    """
     return subprocess.run(
-        ["git", *args], capture_output=True, text=True, check=True
+        ["git", "-c", "core.quotepath=false", *args],
+        capture_output=True, text=True, check=True, encoding="utf-8",
     ).stdout.strip()
 
 
