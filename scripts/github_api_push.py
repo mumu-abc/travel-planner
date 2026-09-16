@@ -142,14 +142,24 @@ def main() -> int:
     files = [f for f in git("diff", "--name-only", base_for_diff, local_head).splitlines() if f]
     print(f"本次改动 {len(files)} 个文件  (基准 {base_for_diff[:7]})")
 
-    # 提交信息：如果一次要推多笔，就汇总它们的标题（否则只写 HEAD 的会把中间的提交说明丢掉）
+    # 提交信息：
+    # 走 API 推送时，远端历史上那些用 API 建的提交 SHA 会被重算，本地这一串
+    # 提交里有一部分「内容其实已经在远端了」。所以不能把 chain[match_idx+1:] 全列出来
+    # —— 那会把早就推过的东西也算成新的。这里只取【从远端内容那一笔到现在】之间
+    # 真正产生文件差异的提交标题。
     pending = chain[match_idx + 1:] if match_idx is not None and match_idx > 0 else []
-    if len(pending) > 1:
-        titles = []
-        for sha in reversed(pending):          # 从旧到新
+    titles = []
+    prev = base_for_diff
+    for sha in reversed(pending):          # 从旧到新
+        changed = git("diff", "--name-only", prev, sha).splitlines()
+        if changed:
             titles.append(git("log", "-1", "--format=%s", sha))
+        prev = sha
+    if len(titles) > 1:
         local_msg = "\n".join(titles)
-        print(f"（本次将 {len(pending)} 笔提交合并为一次推送）")
+        print(f"（本次将 {len(titles)} 笔有实际改动的提交合并为一次推送）")
+    elif len(titles) == 1:
+        local_msg = titles[0]
 
     tree_entries = []
     for path in files:
