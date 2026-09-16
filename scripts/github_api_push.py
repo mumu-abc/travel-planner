@@ -74,8 +74,15 @@ def call(method: str, path: str, tk: str, payload: dict | None = None) -> dict:
 
 
 def git(*args: str) -> str:
+    """跑 git 并返回 stdout。
+
+    注意：默认 `core.quotepath=true` 会把非 ASCII 路径转义成 `\\351\\235\\242...`，
+    导致中文文件名被当成「删除」（git show 取不到内容 → 以为是删文件）。
+    这里统一关掉，让路径以真实 UTF-8 返回。
+    """
     return subprocess.run(
-        ["git", *args], capture_output=True, text=True, check=True
+        ["git", "-c", "core.quotepath=false", *args],
+        capture_output=True, text=True, check=True, encoding="utf-8",
     ).stdout.strip()
 
 
@@ -103,35 +110,46 @@ def main() -> int:
     # 于是「内容完全相同的一笔提交」在本地和远端会拿到两个不同的 SHA。
     # 这种情况下父 SHA 对不上，但其实并没有分叉。
     #
-    # 正确的判据：拿「本地 HEAD 的父提交」的内容(tree) 去和远端 HEAD 的内容(tree) 比。
-    # 一致 → 说明本地就是在远端最新内容上继续做的，属于正常推进（SHA 只是被重算过）。
+    # 正确判据：沿着本地提交链往回找，看有没有哪一笔的 **tree** 等于远端 HEAD 的 tree。
+    # 找到 → 说明远端的内容就在我的历史里，本地是在它之上继续做的，属于正常推进。
+    # 找不到 → 才可能是真分叉（本地丢了远端的改动）。
     remote_info = call("GET", f"/repos/{OWNER}/{REPO}/git/commits/{remote_head}", tk)
     remote_tree = remote_info["tree"]["sha"]
-    remote_parent = remote_info["parents"][0]["sha"]
-
-    base_tree = git("rev-parse", f"{base}^{{tree}}")
     print(f"远端 HEAD tree      = {remote_tree[:12]}")
-    print(f"本地 HEAD 父 tree   = {base_tree[:12]}")
 
-    if base_tree == remote_tree:
-        # 内容对得上：本地就是在远端最新内容之上继续提交的（SHA 只是被重算过）
-        print("  (本地父提交与远端 HEAD 内容一致，仅 SHA 被重算 —— 视为同一笔，正常推进)")
-        base_for_diff = parent           # 远端那个 SHA 本地没有对象，diff 用等价的本地父提交
-        base = remote_head               # 构造 commit 时挂在远端 SHA 上
-    elif remote_parent == parent:
-        # 同父、内容不同：两边各自独立改动，把本地这笔挂到远端之上即可
-        print("  (同父、内容不同 —— 各自独立改动，挂到远端之上)")
-        base_for_diff = parent
+    # 从 HEAD 往回最多看 20 笔
+    chain = git("rev-list", "--max-count=20", "HEAD").splitlines()
+    match_idx = None
+    for idx, sha in enumerate(chain):
+        if git("rev-parse", f"{sha}^{{tree}}") == remote_tree:
+            match_idx = idx
+            break
+
+    if match_idx is not None:
+        # 远端内容就在本地历史第 match_idx 笔上
+        if match_idx == 0:
+            print("  (本地 HEAD 与远端内容一致，无需构造新提交)")
+        else:
+            print(f"  ✓ 远端内容 = 本地历史第 {match_idx} 笔（往回 {match_idx} 个提交待推）")
+        base_for_diff = chain[match_idx] if match_idx < len(chain) else parent
         base = remote_head
     else:
-        print(f"⚠️ 本地 HEAD 的父提交 {parent[:7]} 与远端 HEAD {remote_head[:7]}"
-              f"（其父 {remote_parent[:7]}）对不上，且内容也不一致。")
-        print("   本地与远端确实已分叉，脚本不做强制覆盖，请人工确认。")
+        print(f"⚠️ 本地最近 20 笔提交里，没有一笔的 tree 等于远端 HEAD tree。")
+        print("   本地与远端确实已分叉（可能本地丢了远端改动），脚本不强制覆盖，请人工确认。")
         return 1
 
-    # 这次提交相对「基准」改了哪些文件
+    # 这次要推的内容 = 本地 HEAD 相对「远端内容那一笔」的差异
     files = [f for f in git("diff", "--name-only", base_for_diff, local_head).splitlines() if f]
     print(f"本次改动 {len(files)} 个文件  (基准 {base_for_diff[:7]})")
+
+    # 提交信息：如果一次要推多笔，就汇总它们的标题（否则只写 HEAD 的会把中间的提交说明丢掉）
+    pending = chain[match_idx + 1:] if match_idx is not None and match_idx > 0 else []
+    if len(pending) > 1:
+        titles = []
+        for sha in reversed(pending):          # 从旧到新
+            titles.append(git("log", "-1", "--format=%s", sha))
+        local_msg = "\n".join(titles)
+        print(f"（本次将 {len(pending)} 笔提交合并为一次推送）")
 
     tree_entries = []
     for path in files:
