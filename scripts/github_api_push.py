@@ -85,6 +85,7 @@ def main() -> int:
     local_head = git("rev-parse", "HEAD")
     local_msg = git("log", "-1", "--format=%s%n%n%b")
     parent = git("rev-parse", "HEAD~1")
+    base = parent   # diff 基准，稍后可能被改成 remote_head
 
     remote = call("GET", f"/repos/{OWNER}/{REPO}", tk)
     print(f"远端默认分支 = {remote['default_branch']}")
@@ -97,15 +98,40 @@ def main() -> int:
         print("远端已是最新，无需推送。")
         return 0
 
-    # 本地必须是远端 HEAD 的直接后继，否则说明分叉了，交给人工处理
-    if parent != remote_head:
-        print(f"⚠️ 本地 HEAD 的父提交 {parent[:7]} != 远端 HEAD {remote_head[:7]}")
-        print("   本地与远端可能已分叉，脚本不做强制覆盖，请人工确认。")
+    # 关键：不能用「父提交 SHA 相等」来判断是否分叉。
+    # 走 API 建出来的提交，GitHub 会按自己的时区/签名重算 SHA，
+    # 于是「内容完全相同的一笔提交」在本地和远端会拿到两个不同的 SHA。
+    # 这种情况下父 SHA 对不上，但其实并没有分叉。
+    #
+    # 正确的判据：拿「本地 HEAD 的父提交」的内容(tree) 去和远端 HEAD 的内容(tree) 比。
+    # 一致 → 说明本地就是在远端最新内容上继续做的，属于正常推进（SHA 只是被重算过）。
+    remote_info = call("GET", f"/repos/{OWNER}/{REPO}/git/commits/{remote_head}", tk)
+    remote_tree = remote_info["tree"]["sha"]
+    remote_parent = remote_info["parents"][0]["sha"]
+
+    base_tree = git("rev-parse", f"{base}^{{tree}}")
+    print(f"远端 HEAD tree      = {remote_tree[:12]}")
+    print(f"本地 HEAD 父 tree   = {base_tree[:12]}")
+
+    if base_tree == remote_tree:
+        # 内容对得上：本地就是在远端最新内容之上继续提交的（SHA 只是被重算过）
+        print("  (本地父提交与远端 HEAD 内容一致，仅 SHA 被重算 —— 视为同一笔，正常推进)")
+        base_for_diff = parent           # 远端那个 SHA 本地没有对象，diff 用等价的本地父提交
+        base = remote_head               # 构造 commit 时挂在远端 SHA 上
+    elif remote_parent == parent:
+        # 同父、内容不同：两边各自独立改动，把本地这笔挂到远端之上即可
+        print("  (同父、内容不同 —— 各自独立改动，挂到远端之上)")
+        base_for_diff = parent
+        base = remote_head
+    else:
+        print(f"⚠️ 本地 HEAD 的父提交 {parent[:7]} 与远端 HEAD {remote_head[:7]}"
+              f"（其父 {remote_parent[:7]}）对不上，且内容也不一致。")
+        print("   本地与远端确实已分叉，脚本不做强制覆盖，请人工确认。")
         return 1
 
-    # 算出这次提交涉及哪些文件（相对上一个提交）
-    files = [f for f in git("diff", "--name-only", f"{parent}", f"{local_head}").splitlines() if f]
-    print(f"本次改动 {len(files)} 个文件")
+    # 这次提交相对「基准」改了哪些文件
+    files = [f for f in git("diff", "--name-only", base_for_diff, local_head).splitlines() if f]
+    print(f"本次改动 {len(files)} 个文件  (基准 {base_for_diff[:7]})")
 
     tree_entries = []
     for path in files:
@@ -130,9 +156,8 @@ def main() -> int:
         print(f"  + {path}")
 
     # 基于父 tree 打补丁，保留未改动文件
-    parent_tree = call("GET", f"/repos/{OWNER}/{REPO}/git/commits/{parent}", tk)["tree"]["sha"]
     new_tree = call("POST", f"/repos/{OWNER}/{REPO}/git/trees", tk, {
-        "base_tree": parent_tree,
+        "base_tree": remote_tree,
         "tree": [e for e in tree_entries if e["sha"]],
     })
     # 删除的文件要单独用 sha=null 表达
@@ -147,7 +172,7 @@ def main() -> int:
     commit = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", tk, {
         "message": local_msg,
         "tree": new_tree["sha"],
-        "parents": [parent],
+        "parents": [remote_head],   # 挂在远端 HEAD 上，保证历史收敛（否则每次都要重算 SHA）
     })
     print(f"新 commit = {commit['sha'][:7]}")
 
