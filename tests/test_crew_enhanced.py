@@ -1082,6 +1082,107 @@ class TestSSEEndpoint:
         assert "error" in data["route"]
 
 
+class TestDeleteHistory:
+    """历史记录删除功能。
+
+    关键点有三个，都容易写错：
+      1. 必须级联删掉对话/反馈/SSE 事件，否则留下「孤儿行」；
+      2. 删不存在的记录要返回 404，不能静默成功让前端误判；
+      3. 路由顺序：DELETE /{plan_id} 不能被 GET /search 匹配走。
+    """
+
+    @pytest.fixture
+    def isolated(self):
+        """用独立临时 DB 替换全局 db，避免动到真实数据。"""
+        import tempfile
+        from pathlib import Path
+        import app.database as dbmod
+        import app.routers.history as hist
+
+        tmp = Path(tempfile.mkdtemp(prefix="del_hist_"))
+        test_db = dbmod.Database(str(tmp / "t.db"))
+        orig_db = dbmod.db
+        orig_hist_db = hist.db
+        dbmod.db = test_db
+        hist.db = test_db
+        try:
+            yield test_db
+        finally:
+            dbmod.db = orig_db
+            hist.db = orig_hist_db
+
+    @pytest.fixture
+    def client(self, isolated):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        return TestClient(app)
+
+    def _seed(self, test_db, dest="广东梅州"):
+        pid = test_db.create_plan_pending(dest, 3, 1000, "文化,美食")
+        test_db.update_plan_result(pid, "# 方案正文\n" + "内容" * 60)
+        test_db.save_conversation(pid, "user", "第三天换成海边")
+        test_db.save_conversation(pid, "assistant", "好的")
+        test_db.save_feedback(pid, 4, "不错")
+        test_db.save_sse_event(pid, "final", {"content": "x"})
+        return pid
+
+    def test_delete_removes_record(self, client, isolated):
+        pid = self._seed(isolated)
+        assert len(client.get("/api/history?limit=10").json()["records"]) == 1
+
+        resp = client.delete(f"/api/history/{pid}")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        assert len(client.get("/api/history?limit=10").json()["records"]) == 0
+
+    def test_delete_cascades_related_rows(self, client, isolated):
+        """核心：只删 plans 会留下对话/反馈/事件的孤儿行。"""
+        pid = self._seed(isolated)
+        assert len(isolated.get_conversation_history(pid)) == 2
+        assert len(isolated.get_feedback(pid)) == 1
+        assert len(isolated.get_sse_events(pid)) == 1
+
+        client.delete(f"/api/history/{pid}")
+
+        assert isolated.get_conversation_history(pid) == []
+        assert isolated.get_feedback(pid) == []
+        assert isolated.get_sse_events(pid) == []
+
+    def test_delete_missing_returns_404(self, client):
+        """删不存在的记录必须报错，否则前端会以为删成功了。"""
+        resp = client.delete("/api/history/doesnotexist")
+        assert resp.status_code == 404
+
+    def test_delete_twice_second_is_404(self, client, isolated):
+        pid = self._seed(isolated)
+        assert client.delete(f"/api/history/{pid}").status_code == 200
+        assert client.delete(f"/api/history/{pid}").status_code == 404
+
+    def test_search_route_not_shadowed(self, client, isolated):
+        """/api/history/search 不能被 /{plan_id} 抢先匹配掉。"""
+        self._seed(isolated, dest="梅州")
+        resp = client.get("/api/history/search?destination=梅州")
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+
+    def test_delete_one_keeps_others(self, client, isolated):
+        """删一条不能误伤别的记录。"""
+        keep = self._seed(isolated, dest="东京")
+        drop = self._seed(isolated, dest="梅州")
+        client.delete(f"/api/history/{drop}")
+
+        records = client.get("/api/history?limit=10").json()["records"]
+        assert len(records) == 1
+        assert records[0]["id"] == keep
+
+    def test_delete_plan_method_returns_bool(self, isolated):
+        """DB 层直接返回布尔值，便于调用方判断。"""
+        pid = self._seed(isolated)
+        assert isolated.delete_plan(pid) is True
+        assert isolated.delete_plan(pid) is False
+        assert isolated.delete_plan("never-existed") is False
+
+
 # ── 并发控制测试 ────────────────────────────────────────────
 
 

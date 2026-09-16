@@ -231,6 +231,26 @@ class Database:
         conn.commit()
         return cursor.rowcount
 
+    def delete_plan(self, plan_id: str) -> bool:
+        """删除单条规划记录，返回是否真的删掉了。
+
+        必须连带删掉关联的对话、反馈、SSE 事件：只删 plans 那行的话，
+        追问记录和评分会变成「孤儿行」留在库里 —— 界面上看不见，
+        但会一直占空间，而且如果以后按 plan_id 反查会查到脏数据。
+        （与 cleanup_old_records 用的是同一套级联顺序。）
+        """
+        conn = self._get_conn()
+        # 先确认存在，避免「删了 0 行」也返回成功让前端误判
+        row = conn.execute("SELECT id FROM plans WHERE id = ?", (plan_id,)).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM conversations WHERE plan_id = ?", (plan_id,))
+        conn.execute("DELETE FROM feedback WHERE plan_id = ?", (plan_id,))
+        conn.execute("DELETE FROM sse_events WHERE plan_id = ?", (plan_id,))
+        conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+        conn.commit()
+        return True
+
     # ── 多轮对话方法 ──────────────────────────────────────
 
     def save_conversation(self, plan_id: str, role: str, content: str) -> str:
