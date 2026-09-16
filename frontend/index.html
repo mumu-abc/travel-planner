@@ -798,6 +798,43 @@ body {
 .history-card .dest { font-weight:700; font-size:14px; color:var(--ink); }
 .history-card .info { font-size:12px; color:var(--haze); margin-top:3px; font-family:var(--mono); }
 
+/* 历史记录：卡片改成「主体可点 + 右侧删除键」的两栏结构。
+   删除键平时淡显，hover 卡片时才明显，避免一屏按钮太吵。 */
+.history-card { display:flex; align-items:flex-start; gap:8px; }
+.history-card .hc-main { flex:1; min-width:0; }
+.history-card .hc-del {
+  flex:none;
+  width:26px; height:26px;
+  display:flex; align-items:center; justify-content:center;
+  border:1px solid transparent;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--haze-2);
+  font-size:14px; line-height:1;
+  cursor:pointer;
+  opacity:0;
+  transition:opacity .15s, background .15s, color .15s, border-color .15s;
+}
+.history-card:hover .hc-del { opacity:1; }
+.history-card .hc-del:hover {
+  background:var(--sun);
+  border-color:var(--sun);
+  color:#fff;
+}
+.history-card .hc-del:focus-visible { opacity:1; outline:2px solid var(--route); outline-offset:1px; }
+/* 已确认待删状态：按钮常显并变危险色 */
+.history-card .hc-del.confirming {
+  opacity:1;
+  background:var(--sun);
+  border-color:var(--sun);
+  color:#fff;
+  width:auto;
+  padding:0 8px;
+  font-size:11px;
+  font-weight:600;
+  white-space:nowrap;
+}
+
 .memory-count { font-size:11px; color:var(--haze); font-weight:400; font-family:var(--mono); }
 .memory-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
 .mem-filter-btn {
@@ -1493,11 +1530,72 @@ async function loadHistory() {
       return;
     }
     list.innerHTML = data.records.map(r => `
-      <div class="history-card" onclick="viewHistory('${r.id}')">
-        <div class="dest">${r.destination}</div>
-        <div class="info">${r.days}天 · $${r.budget} · ${r.created_at.slice(0,10)}</div>
+      <div class="history-card">
+        <div class="hc-main" onclick="viewHistory('${r.id}')">
+          <div class="dest">${esc(r.destination)}</div>
+          <div class="info">${r.days}天 · $${r.budget} · ${r.created_at.slice(0,10)}</div>
+        </div>
+        <button class="hc-del" title="删除这条记录"
+                aria-label="删除 ${esc(r.destination)} 的记录"
+                onclick="askDeleteHistory('${r.id}', this)">✕</button>
       </div>`).join('');
   } catch (e) { console.error(e); }
+}
+
+// 删除历史记录：两段式确认（第一次点击变成「确认删除」，再点才真删）。
+// 为什么不做浏览器 confirm 弹窗：原生弹窗在移动端和部分浏览器里样式割裂，
+// 而且会阻塞整个页面；这里就地确认更连贯，也避免误触一按就没了。
+async function askDeleteHistory(id, btn) {
+  if (!btn.classList.contains('confirming')) {
+    // 同一张卡片里如果还有别的按钮在待确认状态，先把它复位，保证一次只确认一个
+    document.querySelectorAll('.hc-del.confirming').forEach(b => {
+      if (b !== btn) resetDeleteBtn(b);
+    });
+    btn.classList.add('confirming');
+    btn.textContent = '确认删除';
+    btn._timer = setTimeout(() => resetDeleteBtn(btn), 4000);  // 4 秒不点自动复位
+    return;
+  }
+  // 第二段：真的删
+  clearTimeout(btn._timer);
+  btn.disabled = true;
+  btn.textContent = '删除中…';
+  try {
+    const resp = await fetch(`/api/history/${id}`, { method: 'DELETE' });
+    if (!resp.ok) {
+      const msg = resp.status === 404 ? '记录已不存在' : `删除失败(${resp.status})`;
+      throw new Error(msg);
+    }
+    // 如果删掉的正是当前正在看的那条，把结果区也清掉，避免留着一份已删方案
+    if (currentPlanId === id) {
+      document.getElementById('resultCard').style.display = 'none';
+      document.getElementById('emptyState').style.display = 'block';
+      document.getElementById('feedbackSection').classList.remove('show');
+      document.getElementById('chatSection').style.display = 'none';
+      currentPlanId = '';
+    }
+    await loadHistory();
+  } catch (e) {
+    btn.disabled = false;
+    resetDeleteBtn(btn);
+    setStatus('删除失败：' + e.message, 'error');
+    // 记录已不存在也刷新一次，让列表和真实状态对齐
+    if (String(e.message).includes('已不存在')) await loadHistory();
+  }
+}
+
+function resetDeleteBtn(btn) {
+  clearTimeout(btn._timer);
+  btn.classList.remove('confirming');
+  btn.disabled = false;
+  btn.textContent = '✕';
+}
+
+// 历史列表里渲染用户输入，必须转义，避免目的地含 < > 时把结构撑破
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
 }
 
 async function viewHistory(id) {
@@ -1508,6 +1606,8 @@ async function viewHistory(id) {
       const r = data.record;
       currentResult = r.result;
       currentMeta = { dest: r.destination, days: r.days, budget: r.budget };
+      // 记住正在看的是哪条，删它的时候才能把结果区一起收掉
+      currentPlanId = id;
       document.getElementById('emptyState').style.display = 'none';
       document.getElementById('resultCard').style.display = 'block';
       setBadge('历史方案', 'done');

@@ -129,7 +129,7 @@ python -m eval.memory_bench --top-k 3                # 记忆检索 Recall@1/3�
 
 **③ 工具缓存收益**（同一批参数跑 2 轮）
 
-命中率 **47.5%**，第二轮节省 **38 次真实外部调用**。TTL 分档：静态检索/路线/预算 24h，天气 30min，汇率与搜索 1h——**只缓存成功结果**，失败不入库，避免把瞬时故障固化成持久故障。
+命中率 **47.5%**，第二轮节省 **38 次真实外部调用**。TTL 分档：静态检索/路线/预算 24h，天气 30min，汇率与搜索 1h——**只缓存「成功」与「终局结论」两类**：成功率复用省时间，终局结论（知识库没这座城）是确定性的、重复问结果不变；唯独不缓存执行失败，避免把瞬时故障固化成持久故障。
 
 **④ 记忆检索**（12 条记忆 / 8 个查询，查询措辞与记忆刻意不重合）
 
@@ -252,6 +252,8 @@ PuLP 在总预算与分项上下限下分配；不可用时回退比例分配。
 | `POST /api/plan/{id}/feedback` | POST | 1–5 星反馈（会注入后续 prompt） |
 | `GET /api/plan/{id}/events` | GET | 断线重连回放 |
 | `GET /api/history` | GET | 历史分页 |
+| `GET /api/history/search` | GET | 按目的地搜索历史 |
+| `DELETE /api/history/{id}` | DELETE | 删除单条历史（级联清理追问/评分/SSE 事件，不存在返回 404） |
 | `GET /api/health` | GET | 健康检查 |
 
 ---
@@ -266,7 +268,7 @@ app/
   evaluation.py       # 多评委模块
   memory.py           # 偏好 + 向量记忆
   tool_metrics.py     # 工具成功率/降级率/耗时埋点（旁路，异常不影响主流程）
-  tool_cache.py       # 工具层 TTL 缓存 + 命中率（只缓存成功结果）
+  tool_cache.py       # 工具层 TTL 缓存 + 命中率（只缓存成功与终局结论）
   routers/metrics.py  # GET /api/metrics/tools|cache 实时观测
   tools/
     knowledge_search.py  # FAISS + Okapi BM25 + GPS 图谱

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.database import db
 from app.models import HistoryResponse, PlanRecord
@@ -45,3 +45,18 @@ async def get_plan(plan_id: str):
     if not record:
         return {"status": "error", "message": "记录不存在"}
     return {"status": "ok", "record": PlanRecord(**record)}
+
+
+@router.delete("/{plan_id}")
+async def delete_plan(plan_id: str):
+    """删除单条历史规划记录（连带其追问记录、评分与 SSE 事件）。
+
+    路由顺序注意：本接口必须放在 GET /search 之后定义，
+    否则 /api/history/search 会被 /{plan_id} 抢先匹配（plan_id="search"）。
+    当前文件里 /search 在前、/{plan_id} 在后，顺序是对的。
+    """
+    ok = db.delete_plan(plan_id)
+    if not ok:
+        # 删除不存在的记录返回 404，前端据此提示「记录已不存在」并刷新列表
+        raise HTTPException(status_code=404, detail="记录不存在或已被删除")
+    return {"status": "ok", "deleted": plan_id}
