@@ -1,6 +1,6 @@
 title: travel-planner-agent
 description: Multi-agent travel planner with ReAct reasoning, hybrid RAG (FAISS+BM25), TSP route optimization, and LP budget optimization — built with FastAPI
-author: ashishpatel26
+author: mumu-abc
 language: python
 framework: fastapi, openai-function-calling, pulp
 tags: [travel, planning, multi-agent, react, rag, fastapi, tsp, constraint-optimization, sse]

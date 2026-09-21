@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HTML = ROOT / "frontend" / "index.html"
 
-NODE = r"C:\Users\钟利林\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"
+# 用 PATH 里的 node 即可，不要写死本机绝对路径（换台机器就失效）
+NODE = shutil.which("node") or "node"
 
 
 def main() -> int:
