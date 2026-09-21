@@ -44,16 +44,6 @@ eval/report*.md
 !eval/report_norefl.md
 !eval/消融对照说明.md
 
-# 个人本地材料（不入公共仓库；如需分享可移除本节）
-面试题目_*.md
-docs/面试*.md
-docs/*八股*.md
-docs/简历*.md
-docs/项目讲解.md
-docs/项目速查手册.md
-docs/演示脚本.md
-docs/消融复测操作清单.md
-
 # 本地临时
 *.log
 *.bak
