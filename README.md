@@ -142,7 +142,7 @@ python -m eval.memory_bench --top-k 3                # 记忆检索 Recall@1/3�
 
 运行时指标可实时查看：`GET /api/metrics/tools`、`GET /api/metrics/cache`。
 
-### 评测 / 消融（面试前必跑）
+### 评测 / 消融
 
 > **跑之前先查配额**（1 秒出结果，不消耗有意义额度）：
 > ```bash
@@ -183,12 +183,6 @@ python -m eval.eval_runner --cases 3 --ablation --output eval/report_ablation.md
 3. **sequential 最差且最慢**（471s，是 single 的 2.3×）—— 并行的价值在延迟，不在质量。
 
 完整报告见 `eval/report_ablation.md`（含逐 case 明细与可靠性说明）。  
-演示与简历见 `docs/`。
-
-### 演示与简历
-
-- `docs/演示脚本.md` — 90 秒口述 + 操作节奏  
-- `docs/简历项目段.md` — 短版/详细版/英文一行（数字跑完再填）
 
 ### 测试
 
@@ -210,7 +204,7 @@ pytest -m slow   # 含 LLM
 
 ### 3. 工具成本预算
 `web_search` 有全局次数上限（`MAX_WEB_SEARCH_CALLS`），超限自动降级到本地 `search_knowledge`。  
-意图：贵工具不是想调就调，面试可讲「成本感知路由」。
+意图：贵工具不是想调就调，做「成本感知路由」。
 
 **联网搜索后端（2026-09 起）**：主后端为 **必应中国 RSS**（实测 0.4s / 中文 / 免密钥），
 DuckDuckGo 与 Wikipedia 降为海外备用。原因是实测国内无代理环境下
@@ -286,7 +280,7 @@ tests/
 
 ---
 
-## 面试 Q&A（按本仓库真实实现）
+## 设计决策 Q&A
 
 **Q: 多 Agent 比单 Agent 好在哪？**  
 A: 分两个维度说，结论不一样。**质量维度**：n=3 消融里 multi 76.7(±5.8) vs single 80.0(±0.0)，分差 3.3 小于波动 5.8 —— 只能说「未见显著差异」，不能说谁更好。**工程维度**：multi 有四条 single 拿不到的东西 —— ① 并行（sequential 471s → multi 324s，同 5 Agent 省 1.45× 墙钟且质量不掉）② 上下文隔离（single 要把 5 板块 + 全部工具返回塞进 1 个 context、8 轮内跑完）③ 失败隔离（单 Agent 挂了不拖垮其余板块）④ 可独立替换（改预算只需重跑 Budget Agent，single 只能整体重跑）。代价是 2.8× token（16.7 vs 6.3 次 LLM 调用）。所以默认档选 single，multi 留作深挖档。
@@ -335,9 +329,3 @@ A: 完整 multi+反思约 3–6 分钟（5 个 LLM 角色 × 多轮工具）。�
 - 缓存命中率 47.5% 来自「同参数跑 2 轮」的合成负载，真实重复查询率取决于用户行为。  
 - 记忆评测用的是 12 条**构造语料**，不是真实用户数据；它证明的是检索方法的相对优势（vs 字面基线 +60% MRR），不是线上效果。  
 - 容错链路的 4 类故障是**注入**的（确定性可回归），不代表生产环境的真实故障分布。
-
----
-
-## 简历一句话（示例）
-
-> 手写 Function Calling 多 Agent 旅行规划系统（FastAPI）：3 层串并行 + 动态路由 + 工具失败降级；Okapi BM25+FAISS 混合检索与 GPS 路线/LP 预算；内置 single/sequential/multi 消融评测，可量化多 Agent 相对单 Agent 的质量–延迟权衡；SSE 断线回放与令牌桶限流保障演示稳定。

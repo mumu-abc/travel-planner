@@ -36,7 +36,7 @@ htmlcov/
 
 # 评测产物（保留 eval/eval_runner.py 与说明；一次性跑分报告忽略）
 eval/report*.md
-# 例外：可复现的基准证据报告（面试官要能直接看到数字）
+# 例外：可复现的基准证据报告（需能被直接引用、可复现）
 !eval/report_latency.md
 !eval/report_tools.md
 !eval/report_memory.md
@@ -44,14 +44,15 @@ eval/report*.md
 !eval/report_norefl.md
 !eval/消融对照说明.md
 
-# 个人求职准备材料（不入公共仓库，如需分享可手动移除本行）
+# 个人本地材料（不入公共仓库；如需分享可移除本节）
 面试题目_*.md
-
-# ↓ 2026-09-21 补：原规则 `面试题目_*.md` 只匹配根目录同名文件，
-#   未覆盖 docs/ 下的求职准备材料（面试总纲/八股清单/简历项目段曾被误推送）
 docs/面试*.md
 docs/*八股*.md
 docs/简历*.md
+docs/项目讲解.md
+docs/项目速查手册.md
+docs/演示脚本.md
+docs/消融复测操作清单.md
 
 # 本地临时
 *.log

@@ -56,7 +56,7 @@ if ($LASTEXITCODE -eq 0) {
   Write-Host ""
   Write-Host "下一步："
   Write-Host "  1) 对照 eval\消融对照说明.md 读结论（重点看 multi vs single 分差与波动）"
-  Write-Host "  2) 把 3 case 的均值更新到 docs\简历项目段.md，去掉 n=1 的表述"
+  Write-Host "  2) 把 3 case 的均值写进 $Output，去掉 n=1 的表述"
 } elseif ($LASTEXITCODE -eq 2) {
   Write-Host ""
   Write-Host "配额未恢复，已终止（本次没有产出无效报告）。恢复后重跑本命令即可。"

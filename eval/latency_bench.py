@@ -10,7 +10,7 @@
     python -m eval.latency_bench --n 20 --concurrency 4
     python -m eval.latency_bench --n 10 --concurrency 1 --output eval/report_latency.md
 
-结果写入 eval/report_latency.md（P50/P95 等），可直接引用到简历/面试。
+结果写入 eval/report_latency.md（P50/P95 等），可直接引用到项目说明。
 """
 
 from __future__ import annotations
